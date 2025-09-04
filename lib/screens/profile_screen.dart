@@ -1,385 +1,435 @@
-import 'package:flutter/material.dart';
-import 'package:provider/provider.dart';
-import 'package:percent_indicator/percent_indicator.dart';
-import 'package:servana/providers/user_provider.dart';
-import 'package:servana/models/user_model.dart';
-import 'package:servana/screens/edit_profile_screen.dart';
-import 'package:servana/screens/wallet_screen.dart';
-import 'package:servana/screens/skill_quests_screen.dart';
-import 'package:servana/screens/settings_screen.dart';
+// lib/screens/profile_screen.dart
+//
+// Role switch lives HERE (and only here), gated by verification.
+// - Reads current user from Firestore: /users/{uid}
+// - Shows profile header, verification status, and mode switch
+// - Mode switch enabled only if user is approved/verified as a helper
+// - Writes UI mode via UserProvider.setUiMode('poster'|'helper')
+// - Optional "Go Live" switch when in Helper mode (wired to UserProvider.setLive)
+// - Button to open Verification Center if not verified
+//
+// Additive, schema-tolerant, null-safe. Does not rename public classes.
+
+import 'package:cloud_firestore/cloud_firestore.dart';
 import 'package:firebase_auth/firebase_auth.dart';
-import 'package:servana/screens/verification_status_screen.dart';
-import 'package:url_launcher/url_launcher.dart';
+import 'package:flutter/material.dart';
+import 'package:servana/screens/step_2_documents.dart' as step2;
+import 'package:servana/screens/verification_center_screen.dart';
+import 'package:provider/provider.dart';
+
+import 'package:servana/providers/user_provider.dart';
+import 'package:servana/screens/verification_center_screen.dart';
 
 class ProfileScreen extends StatelessWidget {
   const ProfileScreen({super.key});
 
   @override
   Widget build(BuildContext context) {
-    return Consumer<UserProvider>(
-      builder: (context, userProvider, child) {
-        final HelpifyUser? user = userProvider.user;
-        if (user == null) {
-          return const Scaffold(body: Center(child: CircularProgressIndicator()));
-        }
-        return _buildProfileScaffold(context, user);
-      },
-    );
-  }
+    final uid = FirebaseAuth.instance.currentUser?.uid;
+    if (uid == null) {
+      return Scaffold(
+        appBar: AppBar(title: const Text('Profile')),
+        body: const Center(child: Text('Please sign in to view your profile.')),
+      );
+    }
 
-  Widget _buildProfileScaffold(BuildContext context, HelpifyUser user) {
     return Scaffold(
-      backgroundColor: Colors.grey[100],
-      appBar: AppBar(
-        title: const Text("My Profile"),
-        actions: [
-          IconButton(
-            icon: const Icon(Icons.settings_outlined),
-            onPressed: () => Navigator.push(context, MaterialPageRoute(builder: (_) => const SettingsScreen())),
-          ),
-        ],
-      ),
-      body: SingleChildScrollView(
-        padding: const EdgeInsets.all(16.0),
-        child: Column(
-          children: [
-            _ProfileHeaderCard(user: user),
-            const SizedBox(height: 16),
-            if (user.profileCompletion < 1.0)
-              _ProfileCompletionCard(completion: user.profileCompletion),
-            const SizedBox(height: 16),
-            _ActionMenu(user: user),
-            if (user.isHelper == true) ...[
+      appBar: AppBar(title: const Text('Profile')),
+      body: StreamBuilder<DocumentSnapshot<Map<String, dynamic>>>(
+        stream: FirebaseFirestore.instance.collection('users').doc(uid).snapshots(),
+        builder: (context, snap) {
+          if (snap.connectionState == ConnectionState.waiting) {
+            return const Center(child: CircularProgressIndicator(strokeWidth: 2));
+          }
+          final data = snap.data?.data() ?? const <String, dynamic>{};
+
+          final displayName = (data['displayName'] as String?)?.trim();
+          final phone = (data['phoneNumber'] as String?) ?? (data['phone'] as String?);
+          final photoURL = (data['photoURL'] as String?) ?? (data['avatarUrl'] as String?);
+          final verificationStatus = (data['verificationStatus'] as String?)?.toLowerCase() ?? 'unverified';
+          final isHelper = data['isHelper'] == true; // server-side helper flag
+          final trustScore = (data['trustScore'] as num?)?.toInt();
+
+          final isVerified = verificationStatus.contains('verified');
+          final canToggleMode = isHelper && isVerified;
+
+          return ListView(
+            padding: const EdgeInsets.fromLTRB(16, 12, 16, 24),
+            children: [
+              _HeaderCard(
+                name: displayName ?? 'User',
+                phone: phone,
+                photoURL: photoURL,
+                trustScore: trustScore,
+                verificationStatus: verificationStatus,
+              ),
+              const SizedBox(height: 12),
+              _VerifyBanner(),
+
               const SizedBox(height: 16),
-              _HelperInfoSection(user: user),
+
+              _ModeCard(
+                canToggle: canToggleMode,
+                verificationStatus: verificationStatus,
+                isHelperServerFlag: isHelper,
+              ),
+
+              const SizedBox(height: 16),
+
+              // Live toggle only when user has switched UI to helper mode
+              const _LiveToggleCard(),
+
+              // You can add more profile sections below (wallet summary, referrals, etc.)
             ],
-            const SizedBox(height: 24),
-            _LogoutButton(),
-            const SizedBox(height: 24),
-          ],
-        ),
+          );
+        },
       ),
     );
   }
 }
 
-class _ProfileHeaderCard extends StatelessWidget {
-  final HelpifyUser user;
-  const _ProfileHeaderCard({required this.user});
+// -----------------------------
+// Header
+// -----------------------------
+class _HeaderCard extends StatelessWidget {
+  const _HeaderCard({
+    required this.name,
+    required this.phone,
+    required this.photoURL,
+    required this.trustScore,
+    required this.verificationStatus,
+  });
+
+  final String name;
+  final String? phone;
+  final String? photoURL;
+  final int? trustScore;
+  final String verificationStatus;
 
   @override
   Widget build(BuildContext context) {
     final theme = Theme.of(context);
-    final bool isVerified = user.verificationStatus == 'verified';
+    final cs = theme.colorScheme;
 
-    return Card(
-      elevation: 2,
-      shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(16)),
+    String prettyStatus(String s) {
+      final t = s.toLowerCase();
+      if (t.contains('verified')) return 'Verified';
+      if (t.contains('pending')) return 'Pending';
+      if (t.contains('rejected')) return 'Rejected';
+      return 'Unverified';
+    }
+
+    Color statusBg(String s) {
+      final t = s.toLowerCase();
+      if (t.contains('verified')) return cs.primary;
+      if (t.contains('pending')) return const Color(0xFFFFA000); // amber
+      if (t.contains('rejected')) return cs.error;
+      return cs.surfaceVariant;
+    }
+
+    Color statusFg(String s) {
+      final t = s.toLowerCase();
+      if (t.contains('verified')) return cs.onPrimary;
+      if (t.contains('pending')) return Colors.black;
+      if (t.contains('rejected')) return cs.onError;
+      return cs.onSurfaceVariant;
+    }
+
+    return Material(
+      color: cs.surface,
+      shape: RoundedRectangleBorder(
+        borderRadius: BorderRadius.circular(16),
+        side: BorderSide(color: cs.outline.withOpacity(0.12)),
+      ),
       child: Padding(
-        padding: const EdgeInsets.all(24.0),
-        child: Column(
+        padding: const EdgeInsets.fromLTRB(12, 12, 12, 16),
+        child: Row(
           children: [
             CircleAvatar(
-              radius: 50,
-              backgroundImage: user.photoURL != null && user.photoURL!.isNotEmpty ? NetworkImage(user.photoURL!) : null,
-              child: user.photoURL == null || user.photoURL!.isEmpty ? const Icon(Icons.person, size: 50) : null,
+              radius: 28,
+              backgroundColor: cs.primary.withOpacity(0.12),
+              backgroundImage: (photoURL != null && photoURL!.isNotEmpty) ? NetworkImage(photoURL!) : null,
+              child: (photoURL == null || photoURL!.isEmpty)
+                  ? Icon(Icons.person_rounded, size: 28, color: cs.primary)
+                  : null,
             ),
-            const SizedBox(height: 16),
-            Row(
-              mainAxisAlignment: MainAxisAlignment.center,
-              children: [
-                Text(user.displayName ?? "Servana User", style: theme.textTheme.headlineSmall?.copyWith(fontWeight: FontWeight.bold)),
-                if(isVerified) ...[
-                  const SizedBox(width: 8),
-                  Tooltip(
-                    message: "Verified Helper (Tier: ${user.verificationTier.name})",
-                    child: const Icon(Icons.verified, color: Colors.blue, size: 22),
-                  ),
-                ],
-              ],
-            ),
-            const SizedBox(height: 4),
-            if (user.email != null) Text(user.email!, style: theme.textTheme.bodyLarge?.copyWith(color: Colors.grey[600])),
-            if (user.isHelper == true) ...[
-              const Divider(height: 32),
-              Row(
-                mainAxisAlignment: MainAxisAlignment.spaceAround,
-                children: [
-                  _StatItem(value: user.averageRating.toStringAsFixed(1), label: "Rating"),
-                  _StatItem(value: user.trustScore.toString(), label: "Trust Score"),
-                  _StatItem(value: user.ratingCount.toString(), label: "Jobs Done"),
-                ],
-              ),
-            ]
-          ],
-        ),
-      ),
-    );
-  }
-}
-
-class _StatItem extends StatelessWidget {
-  final String value;
-  final String label;
-  const _StatItem({required this.value, required this.label});
-
-  @override
-  Widget build(BuildContext context) {
-    return Column(
-      children: [
-        Text(value, style: const TextStyle(fontSize: 22, fontWeight: FontWeight.bold)),
-        const SizedBox(height: 2),
-        Text(label, style: TextStyle(color: Colors.grey[600], fontSize: 14)),
-      ],
-    );
-  }
-}
-
-class _ProfileCompletionCard extends StatelessWidget {
-  final double completion;
-  const _ProfileCompletionCard({required this.completion});
-
-  @override
-  Widget build(BuildContext context) {
-    return Card(
-      elevation: 0,
-      shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(12), side: BorderSide(color: Colors.teal.withOpacity(0.3))),
-      color: Colors.teal.withOpacity(0.05),
-      child: Padding(
-        padding: const EdgeInsets.all(16.0),
-        child: Column(
-          crossAxisAlignment: CrossAxisAlignment.start,
-          children: [
-            Text("Profile Strength", style: Theme.of(context).textTheme.titleMedium?.copyWith(fontWeight: FontWeight.bold, color: Colors.teal.shade800)),
-            const SizedBox(height: 12),
-            LinearPercentIndicator(
-              lineHeight: 12.0,
-              percent: completion,
-              barRadius: const Radius.circular(6),
-              backgroundColor: Colors.grey.shade300,
-              progressColor: Colors.teal,
-            ),
-            const SizedBox(height: 8),
-            TextButton(
-              onPressed: () => Navigator.push(context, MaterialPageRoute(builder: (_) => const EditProfileScreen())),
-              child: const Text("Complete your profile to build more trust"),
-            )
-          ],
-        ),
-      ),
-    );
-  }
-}
-
-// --- THIS WIDGET IS NOW FIXED ---
-class _ActionMenu extends StatelessWidget {
-  final HelpifyUser user;
-  const _ActionMenu({required this.user});
-
-  @override
-  Widget build(BuildContext context) {
-    final bool isHelper = user.isHelper ?? false;
-    return Card(
-      elevation: 0,
-      shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(12)),
-      child: Column(
-        children: [
-          if (isHelper)
-          // Use a Consumer to get the latest state from the UserProvider
-            Consumer<UserProvider>(
-              builder: (context, userProvider, child) {
-                bool isHelperMode = userProvider.activeMode == AppMode.helper;
-                return SwitchListTile(
-                  title: Text(isHelperMode ? "Helper Mode" : "Poster Mode", style: const TextStyle(fontWeight: FontWeight.w600)),
-                  subtitle: Text(isHelperMode ? "You are seeing available tasks" : "You can now post new tasks"),
-                  value: isHelperMode, // Value is now correctly from the provider
-                  onChanged: (value) => context.read<UserProvider>().switchMode(), // Action now calls the provider
-                  secondary: const Icon(Icons.work_outline_rounded),
-                );
-              },
-            )
-          else
-            ListTile(
-              leading: const Icon(Icons.work_outline_rounded),
-              title: const Text("Become a Helper", style: TextStyle(fontWeight: FontWeight.w600)),
-              trailing: const Icon(Icons.arrow_forward_ios_rounded, size: 16),
-              onTap: () { /* TODO: Navigate to helper onboarding */ },
-            ),
-          const Divider(height: 1, indent: 16, endIndent: 16),
-          ListTile(
-            leading: const Icon(Icons.edit_outlined),
-            title: const Text("Edit Profile", style: TextStyle(fontWeight: FontWeight.w600)),
-            trailing: const Icon(Icons.arrow_forward_ios_rounded, size: 16),
-            onTap: () => Navigator.push(context, MaterialPageRoute(builder: (_) => const EditProfileScreen())),
-          ),
-          const Divider(height: 1, indent: 16, endIndent: 16),
-          ListTile(
-            leading: const Icon(Icons.account_balance_wallet_outlined),
-            title: const Text("My Wallet", style: TextStyle(fontWeight: FontWeight.w600)),
-            trailing: const Icon(Icons.arrow_forward_ios_rounded, size: 16),
-            onTap: () => Navigator.push(context, MaterialPageRoute(builder: (_) => const WalletScreen())),
-          ),
-          if (isHelper) ...[
-            const Divider(height: 1, indent: 16, endIndent: 16),
-            ListTile(
-              leading: const Icon(Icons.shield_outlined),
-              title: const Text("My Verification", style: TextStyle(fontWeight: FontWeight.w600)),
-              trailing: const Icon(Icons.arrow_forward_ios_rounded, size: 16),
-              onTap: () => Navigator.push(context, MaterialPageRoute(builder: (_) => const VerificationStatusScreen())),
-            ),
-            const Divider(height: 1, indent: 16, endIndent: 16),
-            ListTile(
-              leading: const Icon(Icons.flag_outlined),
-              title: const Text("Skill Quests", style: TextStyle(fontWeight: FontWeight.w600)),
-              trailing: const Icon(Icons.arrow_forward_ios_rounded, size: 16),
-              onTap: () => Navigator.push(context, MaterialPageRoute(builder: (_) => const SkillQuestsScreen())),
-            ),
-          ],
-        ],
-      ),
-    );
-  }
-}
-
-class _HelperInfoSection extends StatelessWidget {
-  final HelpifyUser user;
-  const _HelperInfoSection({required this.user});
-
-  @override
-  Widget build(BuildContext context) {
-    return Card(
-      elevation: 0,
-      shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(12)),
-      child: Padding(
-        padding: const EdgeInsets.all(16),
-        child: Column(
-          crossAxisAlignment: CrossAxisAlignment.start,
-          children: [
-            Text("My Professional Profile", style: Theme.of(context).textTheme.titleMedium?.copyWith(fontWeight: FontWeight.bold)),
-            const Divider(height: 24),
-
-            if (user.bio != null && user.bio!.isNotEmpty) ...[
-              _buildInfoRow(context, Icons.person_outline, "About Me", user.bio!),
-              const SizedBox(height: 16),
-            ],
-
-            if (user.skills.isNotEmpty) ...[
-              _buildInfoRowWithChips(context, Icons.construction, "Skills", user.skills),
-              const SizedBox(height: 16),
-            ],
-
-            if (user.qualifications != null && user.qualifications!.isNotEmpty) ...[
-              _buildInfoRow(context, Icons.school_outlined, "Qualifications", user.qualifications!),
-              const SizedBox(height: 16),
-            ],
-            if (user.experience != null && user.experience!.isNotEmpty) ...[
-              _buildInfoRow(context, Icons.work_history_outlined, "Experience", user.experience!),
-              const SizedBox(height: 16),
-            ],
-            if (user.videoIntroUrl != null && user.videoIntroUrl!.isNotEmpty) ...[
-              const Text("Video Introduction", style: TextStyle(fontWeight: FontWeight.bold, fontSize: 16)),
-              const SizedBox(height: 8),
-              InkWell(
-                onTap: () async {
-                  final url = Uri.parse(user.videoIntroUrl!);
-                  if (await canLaunchUrl(url)) {
-                    await launchUrl(url);
-                  }
-                },
-                child: Row(children: [
-                  Icon(Icons.play_circle_outline, color: Theme.of(context).primaryColor),
-                  const SizedBox(width: 8),
-                  Text("Watch Helper's Introduction", style: TextStyle(color: Theme.of(context).primaryColor, fontWeight: FontWeight.bold)),
-                ]),
-              ),
-              const SizedBox(height: 16),
-            ],
-
-            if (user.portfolioImageUrls.isNotEmpty) ...[
-              const Text("Portfolio", style: TextStyle(fontWeight: FontWeight.bold, fontSize: 16)),
-              const SizedBox(height: 12),
-              SizedBox(
-                height: 100,
-                child: ListView.builder(
-                  scrollDirection: Axis.horizontal,
-                  itemCount: user.portfolioImageUrls.length,
-                  itemBuilder: (context, index) {
-                    return Padding(
-                      padding: const EdgeInsets.only(right: 8.0),
-                      child: ClipRRect(
-                        borderRadius: BorderRadius.circular(8),
-                        child: Image.network(user.portfolioImageUrls[index], width: 100, height: 100, fit: BoxFit.cover),
+            const SizedBox(width: 12),
+            Expanded(
+              child: DefaultTextStyle(
+                style: theme.textTheme.bodyMedium!,
+                child: Column(
+                  crossAxisAlignment: CrossAxisAlignment.start,
+                  children: [
+                    Text(
+                      name,
+                      maxLines: 1,
+                      overflow: TextOverflow.ellipsis,
+                      style: theme.textTheme.titleMedium?.copyWith(fontWeight: FontWeight.w900, height: 1.1),
+                    ),
+                    const SizedBox(height: 4),
+                    if (phone != null && phone!.isNotEmpty)
+                      Row(
+                        children: [
+                          const Icon(Icons.phone_rounded, size: 16),
+                          const SizedBox(width: 6),
+                          Text(phone!, style: theme.textTheme.bodySmall),
+                        ],
                       ),
-                    );
-                  },
+                    const SizedBox(height: 6),
+                    Wrap(
+                      spacing: 8,
+                      crossAxisAlignment: WrapCrossAlignment.center,
+                      children: [
+                        _Pill(
+                          label: prettyStatus(verificationStatus),
+                          bg: statusBg(verificationStatus),
+                          fg: statusFg(verificationStatus),
+                        ),
+                        if (trustScore != null)
+                          _Pill(
+                            label: 'Trust $trustScore',
+                            bg: cs.tertiaryContainer,
+                            fg: cs.onTertiaryContainer,
+                          ),
+                      ],
+                    ),
+                  ],
                 ),
               ),
-            ]
+            ),
           ],
         ),
       ),
     );
   }
+}
 
-  Widget _buildInfoRow(BuildContext context, IconData icon, String title, String subtitle) {
-    return Row(
-      crossAxisAlignment: CrossAxisAlignment.start,
-      children: [
-        Icon(icon, color: Colors.grey.shade600, size: 20),
-        const SizedBox(width: 12),
-        Expanded(
-          child: Column(
-            crossAxisAlignment: CrossAxisAlignment.start,
-            children: [
-              Text(title, style: Theme.of(context).textTheme.titleSmall?.copyWith(color: Colors.grey.shade700)),
-              const SizedBox(height: 4),
-              Text(subtitle, style: Theme.of(context).textTheme.bodyLarge),
-            ],
-          ),
+// -----------------------------
+// Mode switch (Poster / Helper)
+// -----------------------------
+class _ModeCard extends StatelessWidget {
+  const _ModeCard({
+    required this.canToggle,
+    required this.verificationStatus,
+    required this.isHelperServerFlag,
+  });
+
+  final bool canToggle;
+  final String verificationStatus;
+  final bool isHelperServerFlag;
+
+  @override
+  Widget build(BuildContext context) {
+    final theme = Theme.of(context);
+    final cs = theme.colorScheme;
+    final userProv = context.watch<UserProvider>();
+    final isHelperMode = userProv.isHelperMode;
+
+    return Material(
+      color: cs.surface,
+      shape: RoundedRectangleBorder(
+        borderRadius: BorderRadius.circular(16),
+        side: BorderSide(color: cs.outline.withOpacity(0.12)),
+      ),
+      child: Padding(
+        padding: const EdgeInsets.fromLTRB(12, 12, 12, 16),
+        child: Column(
+          crossAxisAlignment: CrossAxisAlignment.start,
+          children: [
+            Text('App mode', style: theme.textTheme.titleSmall?.copyWith(fontWeight: FontWeight.w900)),
+            const SizedBox(height: 8),
+            SegmentedButton<String>(
+              segments: const [
+                ButtonSegment(value: 'poster', label: Text('Poster'), icon: Icon(Icons.person_pin_circle_rounded)),
+                ButtonSegment(value: 'helper', label: Text('Helper'), icon: Icon(Icons.volunteer_activism_rounded)),
+              ],
+              selected: {isHelperMode ? 'helper' : 'poster'},
+              onSelectionChanged: canToggle
+                  ? (s) => context.read<UserProvider>().setUiMode(s.first)
+                  : null,
+            ),
+            const SizedBox(height: 8),
+            if (!canToggle) _ModeLockedBanner(verificationStatus: verificationStatus, isHelperServerFlag: isHelperServerFlag),
+          ],
         ),
-      ],
+      ),
     );
   }
+}
 
-  Widget _buildInfoRowWithChips(BuildContext context, IconData icon, String title, List<String> chips) {
-    return Row(
+class _ModeLockedBanner extends StatelessWidget {
+  const _ModeLockedBanner({required this.verificationStatus, required this.isHelperServerFlag});
+  final String verificationStatus;
+  final bool isHelperServerFlag;
+
+  @override
+  Widget build(BuildContext context) {
+    final cs = Theme.of(context).colorScheme;
+
+    String message() {
+      final v = verificationStatus.toLowerCase();
+      if (!isHelperServerFlag) {
+        return 'Become a helper to unlock Helper mode.';
+      }
+      if (v.contains('pending')) {
+        return 'Verification pending. You can switch modes after approval.';
+      }
+      if (v.contains('rejected')) {
+        return 'Verification was rejected. Fix your documents and resubmit.';
+      }
+      return 'You must be verified to switch to Helper mode.';
+    }
+
+    return Column(
       crossAxisAlignment: CrossAxisAlignment.start,
       children: [
-        Icon(icon, color: Colors.grey.shade600, size: 20),
-        const SizedBox(width: 12),
-        Expanded(
-          child: Column(
-            crossAxisAlignment: CrossAxisAlignment.start,
-            children: [
-              Text(title, style: Theme.of(context).textTheme.titleSmall?.copyWith(color: Colors.grey.shade700)),
-              const SizedBox(height: 8),
-              Wrap(
-                spacing: 8.0,
-                runSpacing: 4.0,
-                children: chips.map((chip) => Chip(label: Text(chip))).toList(),
-              ),
-            ],
-          ),
+        Text(
+          message(),
+          style: Theme.of(context).textTheme.bodySmall?.copyWith(color: cs.onSurfaceVariant),
+        ),
+        const SizedBox(height: 8),
+        OutlinedButton.icon(
+          onPressed: () {
+            Navigator.push(context, MaterialPageRoute(builder: (_) => const VerificationCenterScreen()));
+          },
+          icon: const Icon(Icons.verified_user_rounded),
+          label: const Text('Open Verification Center'),
         ),
       ],
     );
   }
 }
 
-class _LogoutButton extends StatelessWidget {
+// -----------------------------
+// Live toggle (Helper mode)
+// -----------------------------
+class _LiveToggleCard extends StatelessWidget {
+  const _LiveToggleCard();
+
   @override
   Widget build(BuildContext context) {
-    return OutlinedButton.icon(
-      icon: const Icon(Icons.logout),
-      label: const Text('Logout'),
-      onPressed: () async {
-        await FirebaseAuth.instance.signOut();
-      },
-      style: OutlinedButton.styleFrom(
-        foregroundColor: Colors.red.shade700,
-        minimumSize: const Size(double.infinity, 50),
-        side: BorderSide(color: Colors.red.shade200),
+    final userProv = context.watch<UserProvider>();
+    final isHelperMode = userProv.isHelperMode;
+
+    if (!isHelperMode) return const SizedBox.shrink();
+
+    final theme = Theme.of(context);
+    final cs = theme.colorScheme;
+
+    return Material(
+      color: cs.surface,
+      shape: RoundedRectangleBorder(
+        borderRadius: BorderRadius.circular(16),
+        side: BorderSide(color: cs.outline.withOpacity(0.12)),
       ),
+      child: SwitchListTile.adaptive(
+        title: const Text('Go Live'),
+        subtitle: Text(
+          userProv.isLive
+              ? 'You are visible to posters nearby.'
+              : 'Go live to auto-surface on maps and Smart Leads.',
+          style: theme.textTheme.bodySmall?.copyWith(color: cs.onSurfaceVariant),
+        ),
+        value: userProv.isLive,
+        onChanged: (v) => context.read<UserProvider>().setLive(v),
+        secondary: Container(
+          width: 44,
+          height: 44,
+          decoration: BoxDecoration(
+            color: cs.primary.withOpacity(0.12),
+            shape: BoxShape.circle,
+          ),
+          child: const Icon(Icons.podcasts_rounded),
+        ),
+      ),
+    );
+  }
+}
+
+// -----------------------------
+// Small pill
+// -----------------------------
+class _Pill extends StatelessWidget {
+  const _Pill({required this.label, required this.bg, required this.fg});
+  final String label;
+  final Color bg;
+  final Color fg;
+
+  @override
+  Widget build(BuildContext context) {
+    return Container(
+      padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 6),
+      decoration: BoxDecoration(
+        color: bg,
+        borderRadius: BorderRadius.circular(999),
+      ),
+      child: Text(
+        label,
+        style: Theme.of(context).textTheme.labelSmall?.copyWith(
+          color: fg,
+          fontWeight: FontWeight.w800,
+          height: 1.1,
+        ),
+      ),
+    );
+  }
+}
+
+class _VerifyBanner extends StatelessWidget {
+  @override
+  Widget build(BuildContext context) {
+    final uid = FirebaseAuth.instance.currentUser?.uid;
+    if (uid == null) return const SizedBox.shrink();
+    final cs = Theme.of(context).colorScheme;
+    return StreamBuilder<DocumentSnapshot<Map<String, dynamic>>>(
+      stream: FirebaseFirestore.instance.collection('users').doc(uid).snapshots(),
+      builder: (context, snap) {
+        final data = snap.data?.data() ?? const <String, dynamic>{};
+        final allowed = (data['allowedCategoryIds'] is List) ? List<String>.from(data['allowedCategoryIds']) : const <String>[];
+        if (allowed.isNotEmpty) return const SizedBox.shrink(); // already verified for something
+
+        return Container(
+          padding: const EdgeInsets.all(12),
+          decoration: BoxDecoration(
+            color: cs.surface,
+            borderRadius: BorderRadius.circular(12),
+            border: Border.all(color: cs.outlineVariant),
+          ),
+          child: Row(
+            children: [
+              Icon(Icons.verified_user_rounded, color: cs.primary),
+              const SizedBox(width: 10),
+              Expanded(
+                child: Column(
+                  crossAxisAlignment: CrossAxisAlignment.start,
+                  children: [
+                    Text('Finish verification to unlock tasks', style: Theme.of(context).textTheme.titleSmall),
+                    const SizedBox(height: 2),
+                    Text(
+                      'Physical: basic docs + category proof • Online: category proof only',
+                      style: Theme.of(context).textTheme.bodySmall,
+                    ),
+                  ],
+                ),
+              ),
+              const SizedBox(width: 8),
+              TextButton(
+                onPressed: () {
+                  Navigator.push(context, MaterialPageRoute(builder: (_) => const VerificationCenterScreen()));
+                },
+                child: const Text('Open center'),
+              ),
+              FilledButton.tonalIcon(
+                onPressed: () {
+                  Navigator.push(context, MaterialPageRoute(builder: (_) => const step2.Step2Documents()));
+                },
+                icon: const Icon(Icons.upload_file_rounded, size: 18),
+                label: const Text('Upload docs'),
+              ),
+            ],
+          ),
+        );
+      },
     );
   }
 }

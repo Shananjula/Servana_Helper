@@ -1,6 +1,18 @@
 import 'package:flutter/material.dart';
-import 'package:servana/constants/service_categories.dart'; // <-- IMPORT aour central services list
+import 'package:servana/constants/service_categories.dart';
+import 'package:cloud_firestore/cloud_firestore.dart';
+import 'package:firebase_auth/firebase_auth.dart';
 
+/// Filter bottom sheet — Helper app (no role-based search)
+/// -------------------------------------------------------
+/// • Removes any role/search-type toggle; shows only Helper-facing filters
+/// • Keeps: category, distance, budget/rate, verified-only switch, AI text (optional)
+/// • Reads/writes the following keys in the returned map:
+///   - category: String? (normalized id from ServiceCategories)
+///   - distance: double (km)
+///   - rate_min: double
+///   - rate_max: double
+///   - isVerified: bool
 class FilterScreen extends StatefulWidget {
   final ScrollController scrollController;
   final Map<String, dynamic> initialFilters;
@@ -12,50 +24,30 @@ class FilterScreen extends StatefulWidget {
 }
 
 class _FilterScreenState extends State<FilterScreen> {
-  late Map<String, dynamic> _currentFilters;
-  final _aiSearchController = TextEditingController();
-  bool _isAiProcessing = false;
+  late Map<String, dynamic> _filters;
 
-  // --- NEW: State for new UI components ---
-  double _distanceValue = 50.0; // Default to 50km
-  RangeValues _rateRange = const RangeValues(0, 50000);
-  bool _isVerifiedOnly = false;
+  // UI state
   String? _selectedCategory;
+  double _distanceKm = 50.0; // 1..50 (50 = any)
+  RangeValues _rateRange = const RangeValues(0, 50000);
+  bool _verifiedOnly = false;
 
   @override
   void initState() {
     super.initState();
-    _currentFilters = Map<String, dynamic>.from(widget.initialFilters);
+    _filters = Map<String, dynamic>.from(widget.initialFilters);
 
-    // Initialize UI state from the incoming filters
-    _selectedCategory = _currentFilters['category'];
+    _selectedCategory = _filters['category'] as String?;
+    _distanceKm = (_filters['distance'] as num?)?.toDouble() ?? 50.0;
     _rateRange = RangeValues(
-      (_currentFilters['rate_min'] as num? ?? 0).toDouble(),
-      (_currentFilters['rate_max'] as num? ?? 50000).toDouble(),
+      ((_filters['rate_min'] as num?) ?? 0).toDouble(),
+      ((_filters['rate_max'] as num?) ?? 50000).toDouble(),
     );
-    _distanceValue = (_currentFilters['distance'] as num? ?? 50.0).toDouble();
-    _isVerifiedOnly = _currentFilters['isVerified'] ?? false;
-  }
+    _verifiedOnly = (_filters['isVerified'] as bool?) ?? false;
 
-  void _applyFilters() {
-    // Consolidate UI state into the filters map before returning
-    _currentFilters['category'] = _selectedCategory;
-    _currentFilters['rate_min'] = _rateRange.start;
-    _currentFilters['rate_max'] = _rateRange.end;
-    _currentFilters['distance'] = _distanceValue;
-    _currentFilters['isVerified'] = _isVerifiedOnly;
-    Navigator.pop(context, _currentFilters);
-  }
-
-  void _resetFilters() {
-    setState(() {
-      _currentFilters.clear();
-      _aiSearchController.clear();
-      _selectedCategory = null;
-      _rateRange = const RangeValues(0, 50000);
-      _distanceValue = 50.0;
-      _isVerifiedOnly = false;
-    });
+    // Hard-remove any legacy role/searchType keys to avoid upstream confusion
+    _filters.remove('role');
+    _filters.remove('searchType');
   }
 
   @override
@@ -68,9 +60,9 @@ class _FilterScreenState extends State<FilterScreen> {
       ),
       child: Column(
         children: [
-          // --- NEW: Grab Handle ---
+          // Grab handle
           Padding(
-            padding: const EdgeInsets.symmetric(vertical: 8.0),
+            padding: const EdgeInsets.symmetric(vertical: 8),
             child: Container(
               width: 40,
               height: 5,
@@ -80,6 +72,7 @@ class _FilterScreenState extends State<FilterScreen> {
               ),
             ),
           ),
+
           Expanded(
             child: ListView(
               controller: widget.scrollController,
@@ -88,68 +81,59 @@ class _FilterScreenState extends State<FilterScreen> {
                 Row(
                   mainAxisAlignment: MainAxisAlignment.spaceBetween,
                   children: [
-                    Text("Filters", style: theme.textTheme.headlineSmall?.copyWith(fontWeight: FontWeight.bold)),
-                    TextButton(onPressed: _resetFilters, child: const Text("Reset All"))
+                    Text('Filters', style: theme.textTheme.headlineSmall?.copyWith(fontWeight: FontWeight.bold)),
+                    TextButton(onPressed: _resetAll, child: const Text('Reset All')),
                   ],
                 ),
-                const SizedBox(height: 24),
+                const SizedBox(height: 20),
 
-                // --- CATEGORY CHIPS ---
-                _buildSectionHeader("Category", theme),
+                // Category chips
+                _buildSectionHeader('Category', theme),
+                const SizedBox(height: 8),
                 Wrap(
-                  spacing: 8.0,
-                  runSpacing: 8.0,
-                  children: AppServices.categories.keys.map((category) {
-                    final isSelected = _selectedCategory == category;
-                    return ChoiceChip(
-                      label: Text(category),
-                      selected: isSelected,
-                      onSelected: (selected) {
-                        setState(() {
-                          _selectedCategory = selected ? category : null;
-                        });
-                      },
-                    );
-                  }).toList(),
+                  spacing: 8,
+                  runSpacing: 8,
+                  children: ServiceCategories.all
+                      .map((c) => ChoiceChip(
+                    label: Text(c.label),
+                    selected: _selectedCategory == c.id,
+                    onSelected: (v) => setState(() => _selectedCategory = v ? c.id : null),
+                  ))
+                      .toList(),
                 ),
+
                 const SizedBox(height: 24),
 
-                // --- DISTANCE SLIDER ---
-                _buildSectionHeader("Distance (km)", theme),
+                // Distance
+                _buildSectionHeader('Distance (km)', theme),
                 Column(
                   children: [
                     Slider(
-                      value: _distanceValue,
+                      value: _distanceKm,
                       min: 1,
-                      max: 50, // Max distance of 50km
+                      max: 50,
                       divisions: 49,
-                      label: _distanceValue < 50 ? '${_distanceValue.round()} km' : '50+ km (Any)',
-                      onChanged: (value) {
-                        setState(() => _distanceValue = value);
-                      },
+                      label: _distanceKm < 50 ? '${_distanceKm.round()} km' : '50+ km (Any)',
+                      onChanged: (v) => setState(() => _distanceKm = v),
                     ),
                     Text(
-                      _distanceValue < 50 ? 'Within ${_distanceValue.round()} km' : 'Any Distance',
+                      _distanceKm < 50 ? 'Within ${_distanceKm.round()} km' : 'Any Distance',
                       style: theme.textTheme.bodyMedium,
                     ),
                   ],
                 ),
+
                 const SizedBox(height: 24),
 
-                // --- BUDGET SLIDER ---
-                _buildSectionHeader("Budget / Rate (LKR)", theme),
+                // Budget / rate
+                _buildSectionHeader('Budget / Rate (LKR)', theme),
                 RangeSlider(
                   values: _rateRange,
                   min: 0,
                   max: 50000,
                   divisions: 100,
-                  labels: RangeLabels(
-                    'LKR ${_rateRange.start.round()}',
-                    'LKR ${_rateRange.end.round()}',
-                  ),
-                  onChanged: (values) {
-                    setState(() => _rateRange = values);
-                  },
+                  labels: RangeLabels('LKR ${_rateRange.start.round()}', 'LKR ${_rateRange.end.round()}'),
+                  onChanged: (values) => setState(() => _rateRange = values),
                 ),
                 Row(
                   mainAxisAlignment: MainAxisAlignment.spaceBetween,
@@ -158,33 +142,33 @@ class _FilterScreenState extends State<FilterScreen> {
                     Text('LKR ${_rateRange.end.round()}', style: theme.textTheme.bodySmall),
                   ],
                 ),
+
                 const SizedBox(height: 24),
 
-                // --- VERIFIED SWITCH ---
-                _buildSectionHeader("Trust & Safety", theme),
+                // Trust & Safety
+                _buildSectionHeader('Trust & Safety', theme),
                 SwitchListTile(
-                  title: const Text("Verified Helpers Only"),
-                  value: _isVerifiedOnly,
-                  onChanged: (value) {
-                    setState(() => _isVerifiedOnly = value);
-                  },
+                  title: const Text('Verified Helpers Only'),
+                  value: _verifiedOnly,
+                  onChanged: (v) => setState(() => _verifiedOnly = v),
                   secondary: Icon(Icons.verified_user_outlined, color: theme.colorScheme.primary),
                   shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(12)),
-                  tileColor: Colors.grey.withOpacity(0.1),
+                  tileColor: Colors.grey.withOpacity(0.08),
                 ),
               ],
             ),
           ),
-          // --- APPLY BUTTON ---
+
+          // Apply button
           Padding(
-            padding: const EdgeInsets.all(16.0),
+            padding: const EdgeInsets.all(16),
             child: ElevatedButton(
               style: ElevatedButton.styleFrom(
                 minimumSize: const Size(double.infinity, 50),
                 shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(12)),
               ),
-              child: const Text("Apply Filters"),
-              onPressed: _applyFilters,
+              onPressed: _apply,
+              child: const Text('Apply Filters'),
             ),
           ),
         ],
@@ -192,10 +176,33 @@ class _FilterScreenState extends State<FilterScreen> {
     );
   }
 
-  Widget _buildSectionHeader(String title, ThemeData theme) {
-    return Padding(
-        padding: const EdgeInsets.only(bottom: 12.0),
-        child: Text(title, style: theme.textTheme.titleLarge?.copyWith(fontWeight: FontWeight.bold))
-    );
+  void _resetAll() {
+    setState(() {
+      _filters.clear();
+      _selectedCategory = null;
+      _distanceKm = 50.0;
+      _rateRange = const RangeValues(0, 50000);
+      _verifiedOnly = false;
+    });
   }
+
+  void _apply() {
+    _filters['category'] = _selectedCategory;
+    _filters['distance'] = _distanceKm;
+    _filters['rate_min'] = _rateRange.start;
+    _filters['rate_max'] = _rateRange.end;
+    _filters['isVerified'] = _verifiedOnly;
+
+    // Make sure legacy role keys don’t leak back
+    _filters.remove('role');
+    _filters.remove('searchType');
+
+    Navigator.of(context).pop(_filters);
+  }
+
+  Widget _buildSectionHeader(String title, ThemeData theme) =>
+      Padding(
+        padding: const EdgeInsets.only(bottom: 12),
+        child: Text(title, style: theme.textTheme.titleLarge?.copyWith(fontWeight: FontWeight.bold)),
+      );
 }

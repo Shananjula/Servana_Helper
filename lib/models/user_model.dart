@@ -7,7 +7,10 @@ class HelpifyUser {
   final String? displayName;
   final String? email;
   final String? photoURL;
-  final String? phone; // <-- UPDATED from phoneNumber
+
+  /// Canonical number in profile
+  final String? phone;
+
   final String? bio;
   final bool? isHelper;
   final bool isLive;
@@ -58,7 +61,7 @@ class HelpifyUser {
     this.displayName,
     this.email,
     this.photoURL,
-    this.phone, // <-- UPDATED from phoneNumber
+    this.phone,
     this.bio,
     this.isHelper,
     this.isLive = false,
@@ -95,7 +98,7 @@ class HelpifyUser {
   }) : profileCompletion = _calculateProfileCompletion(
     displayName: displayName,
     photoURL: photoURL,
-    phone: phone, // <-- UPDATED from phoneNumber
+    phone: phone,
     bio: bio,
     isHelper: isHelper,
     qualifications: qualifications,
@@ -104,6 +107,7 @@ class HelpifyUser {
     portfolioImageUrls: portfolioImageUrls,
   );
 
+  /// UPDATED: prefer 'phone' but fall back to legacy 'phoneNumber'
   factory HelpifyUser.fromFirestore(DocumentSnapshot<Map<String, dynamic>> snapshot) {
     final data = snapshot.data();
     if (data == null) {
@@ -114,7 +118,7 @@ class HelpifyUser {
       displayName: data['displayName'] as String?,
       email: data['email'] as String?,
       photoURL: data['photoURL'] as String?,
-      phone: data['phone'] as String?, // <-- UPDATED from phoneNumber
+      phone: (data['phone'] as String?) ?? (data['phoneNumber'] as String?), // <—
       bio: data['bio'] as String?,
       isHelper: data['isHelper'] as bool?,
       isLive: data['isLive'] as bool? ?? false,
@@ -155,15 +159,21 @@ class HelpifyUser {
   }
 
   static double _calculateProfileCompletion({
-    String? displayName, String? photoURL, String? phone, String? bio, // <-- UPDATED from phoneNumber
-    bool? isHelper, String? qualifications, String? experience, List<String>? skills,
+    String? displayName,
+    String? photoURL,
+    String? phone,
+    String? bio,
+    bool? isHelper,
+    String? qualifications,
+    String? experience,
+    List<String>? skills,
     List<String>? portfolioImageUrls,
   }) {
     int score = 0;
     int maxScore = 4;
     if (displayName != null && displayName.isNotEmpty) score++;
     if (photoURL != null && photoURL.isNotEmpty) score++;
-    if (phone != null && phone.isNotEmpty) score++; // <-- UPDATED from phoneNumber
+    if (phone != null && phone.isNotEmpty) score++;
     if (bio != null && bio.isNotEmpty) score++;
     if (isHelper == true) {
       maxScore = 8;

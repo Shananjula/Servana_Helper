@@ -1,7 +1,10 @@
-// lib/widgets/category_grid_view.dart - UPDATED & MODERNIZED
-
 import 'package:flutter/material.dart';
-import 'package:servana/screens/home_screen.dart'; // To get TaskMode enum
+import 'package:provider/provider.dart';
+import 'package:servana/providers/user_provider.dart';
+import 'package:servana/utils/verification_nav.dart';
+
+// --- FIX: The TaskMode enum is now defined here, making this widget self-contained ---
+enum TaskMode { physical, online }
 
 class Category {
   final String name;
@@ -14,6 +17,7 @@ class Category {
 class CategoryGridView extends StatelessWidget {
   final Function(String) onCategoryTap;
   final TaskMode taskMode;
+  final bool guardForHelper;
 
   const CategoryGridView({
     super.key,
@@ -23,7 +27,6 @@ class CategoryGridView extends StatelessWidget {
 
   @override
   Widget build(BuildContext context) {
-    // --- NEW: Modernized lists with new categories and icons ---
     final List<Category> physicalCategories = [
       Category(name: 'Home Tutoring', icon: Icons.school_rounded, color: const Color(0xFF8E44AD)),
       Category(name: 'Rider', icon: Icons.motorcycle_rounded, color: const Color(0xFF27AE60)),
@@ -46,7 +49,6 @@ class CategoryGridView extends StatelessWidget {
       Category(name: 'Lifestyle', icon: Icons.self_improvement_rounded, color: const Color(0xFFF39C12)),
     ];
 
-    // --- Choose the correct list based on the taskMode ---
     final categories = taskMode == TaskMode.physical ? physicalCategories : onlineCategories;
 
     return GridView.builder(
@@ -55,7 +57,7 @@ class CategoryGridView extends StatelessWidget {
       gridDelegate: const SliverGridDelegateWithFixedCrossAxisCount(
         crossAxisCount: 4,
         crossAxisSpacing: 12,
-        mainAxisSpacing: 16, // Increased spacing for a cleaner look
+        mainAxisSpacing: 16,
         childAspectRatio: 0.9,
       ),
       itemCount: categories.length,
@@ -70,8 +72,8 @@ class CategoryGridView extends StatelessWidget {
                 width: 60,
                 height: 60,
                 decoration: BoxDecoration(
-                  color: category.color.withOpacity(0.1), // Softer background
-                  borderRadius: BorderRadius.circular(18), // Slightly more rounded
+                  color: category.color.withOpacity(0.1),
+                  borderRadius: BorderRadius.circular(18),
                 ),
                 child: Icon(category.icon, size: 30, color: category.color),
               ),
@@ -80,7 +82,7 @@ class CategoryGridView extends StatelessWidget {
                 category.name,
                 style: Theme.of(context).textTheme.bodySmall?.copyWith(fontWeight: FontWeight.w600),
                 textAlign: TextAlign.center,
-                maxLines: 1, // Ensure text doesn't wrap awkwardly
+                maxLines: 1,
                 overflow: TextOverflow.ellipsis,
               ),
             ],

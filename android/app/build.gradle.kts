@@ -2,75 +2,71 @@ import java.util.Properties
 
 plugins {
     id("com.android.application")
-    id("kotlin-android")
+    id("org.jetbrains.kotlin.android")
     id("com.google.gms.google-services")
     id("dev.flutter.flutter-gradle-plugin")
 }
 
-val localProperties = Properties()
-val localPropertiesFile = rootProject.file("local.properties")
-if (localPropertiesFile.exists()) {
-    localProperties.load(localPropertiesFile.inputStream())
+val localProperties = Properties().apply {
+    val f = rootProject.file("local.properties")
+    if (f.exists()) f.inputStream().use { load(it) }
 }
-
-val flutterVersionCode: String = localProperties.getProperty("flutter.versionCode") ?: "1"
-val flutterVersionName: String = localProperties.getProperty("flutter.versionName") ?: "1.0"
-
+val flutterVersionCode = (localProperties.getProperty("flutter.versionCode") ?: "1").toInt()
+val flutterVersionName = localProperties.getProperty("flutter.versionName") ?: "1.0.0"
 
 android {
-    namespace = "com.example.new_helpify"
-    // --- FIX 1: Updated SDK version as required by the error log ---
+    namespace = "com.servana.helper"
+
     compileSdk = 35
     ndkVersion = "27.0.12077973"
 
-    compileOptions {
-        isCoreLibraryDesugaringEnabled = true
-
-        sourceCompatibility = JavaVersion.VERSION_17
-        targetCompatibility = JavaVersion.VERSION_17
-    }
-
-    kotlinOptions {
-        jvmTarget = "17"
-    }
-
-    sourceSets {
-        getByName("main").java.srcDirs("src/main/kotlin")
-    }
-
     defaultConfig {
-        applicationId = "com.example.new_helpify"
+        applicationId = "com.servana.helper"
         minSdk = 23
-        // Also update targetSdk to match compileSdk
-
         targetSdk = 35
-        versionCode = flutterVersionCode.toInt()
+
+        versionCode = flutterVersionCode
         versionName = flutterVersionName
 
-        // --- ADD THIS LINE TO ENABLE MULTIDEX ---
         multiDexEnabled = true
     }
 
     buildTypes {
         release {
+            // Use debug keystore for now; replace with your real signingConfig when ready
             signingConfig = signingConfigs.getByName("debug")
+            // isMinifyEnabled = true // enable later with proper rules
         }
+    }
+
+    compileOptions {
+        isCoreLibraryDesugaringEnabled = true
+        sourceCompatibility = JavaVersion.VERSION_17
+        targetCompatibility = JavaVersion.VERSION_17
+    }
+    kotlinOptions { jvmTarget = "17" }
+
+    sourceSets {
+        getByName("main").java.srcDirs("src/main/kotlin")
     }
 }
 
+// Required by the Flutter Android plugin
 flutter {
     source = "../.."
 }
 
 dependencies {
-    // --- FIX 2: Updated desugaring library version as required by the error log ---
+    // Desugaring
     coreLibraryDesugaring("com.android.tools:desugar_jdk_libs:2.1.4")
 
-
-// Your existing Firebase dependencies
+    // Firebase (BOM keeps versions aligned)
     implementation(platform("com.google.firebase:firebase-bom:33.0.0"))
     implementation("com.google.firebase:firebase-analytics-ktx")
     implementation("com.google.firebase:firebase-auth-ktx")
     implementation("com.google.firebase:firebase-firestore-ktx")
     implementation("com.google.firebase:firebase-storage-ktx")
+
+    // If you ever drop minSdk below 21, add:
+    // implementation("androidx.multidex:multidex:2.0.1")
 }

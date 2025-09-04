@@ -1,80 +1,62 @@
-import 'dart:io';
-import 'package:flutter/material.dart';
+
+// lib/services/storage_service.dart
+//
+// Unified storage helper with document-proof helpers.
+// NOTE: This file replaces any placeholder implementations.
+// It supports both mobile and web by accepting either XFile or Uint8List.
+//
+import 'dart:typed_data';
 import 'package:firebase_storage/firebase_storage.dart';
-import 'package:cloud_firestore/cloud_firestore.dart';
-import 'package:firebase_auth/firebase_auth.dart';
 import 'package:image_picker/image_picker.dart';
 
 class StorageService {
-  final FirebaseStorage _storage = FirebaseStorage.instance;
-  final FirebaseFirestore _firestore = FirebaseFirestore.instance;
-  final FirebaseAuth _auth = FirebaseAuth.instance;
+  StorageService._();
+  static final StorageService instance = StorageService._();
 
-  /// Picks an image from the user's gallery.
-  /// Returns a File object or null if the user cancels.
-  Future<File?> pickImage() async {
-    try {
-      final pickedFile = await ImagePicker().pickImage(source: ImageSource.gallery, imageQuality: 70);
-      if (pickedFile != null) {
-        return File(pickedFile.path);
-      }
-      return null;
-    } catch (e) {
-      print("Error picking image: $e");
-      return null;
+  final FirebaseStorage _fs = FirebaseStorage.instance;
+
+  Future<String> _putAndGetUrl(Reference ref, dynamic fileOrBytes, {SettableMetadata? metadata}) async {
+    if (fileOrBytes is XFile) {
+      await ref.putData(await fileOrBytes.readAsBytes(), metadata);
+    } else if (fileOrBytes is Uint8List) {
+      await ref.putData(fileOrBytes, metadata);
+    } else {
+      throw ArgumentError('Unsupported file type. Provide XFile or Uint8List.');
     }
+    return ref.getDownloadURL();
   }
 
-  /// Uploads a file to the correct user-specific path in Firebase Storage
-  /// and then updates the corresponding field in the user's Firestore document.
-  Future<String?> uploadFileAndUpdateUser({
-    required File file,
-    required String documentType, // e.g., "nicFrontUrl"
-    required BuildContext context, // For showing SnackBars
+  String _ts() => DateTime.now().toUtc().millisecondsSinceEpoch.toString();
+
+  // ---- App-specific helpers ----
+
+  Future<String> uploadUserAvatar(String uid, dynamic fileOrBytes) async {
+    final ref = _fs.ref().child('users/$uid/avatar/${_ts()}.jpg');
+    return _putAndGetUrl(ref, fileOrBytes, metadata: SettableMetadata(contentType: 'image/jpeg'));
+  }
+
+  Future<String> uploadChatImage(String channelId, String uid, dynamic fileOrBytes) async {
+    final ref = _fs.ref().child('chat_attachments/$channelId/${_ts()}_$uid.jpg');
+    return _putAndGetUrl(ref, fileOrBytes, metadata: SettableMetadata(contentType: 'image/jpeg'));
+  }
+
+  /// Uploads a verification document (image/pdf) for a specific category
+  /// Path: proofs/{uid}/{categoryId}/{timestamp}_{name}
+  Future<String> uploadVerificationDoc({
+    required String uid,
+    required String categoryId,
+    required Uint8List bytes,
+    required String fileName,
+    String? contentType,
   }) async {
-    final user = _auth.currentUser;
-    if (user == null) {
-      ScaffoldMessenger.of(context).showSnackBar(
-        const SnackBar(content: Text("Error: You must be logged in to upload files.")),
-      );
-      return null;
-    }
+    final sanitized = fileName.replaceAll(RegExp(r'[^a-zA-Z0-9_.-]'), '_');
+    final path = 'proofs/$uid/$categoryId/${_ts()}_$sanitized';
+    final ref = _fs.ref(path);
+    await ref.putData(bytes, SettableMetadata(contentType: contentType ?? 'application/octet-stream'));
+    return ref.getDownloadURL();
+  }
 
-    try {
-      // --- THIS IS THE CRITICAL PART ---
-      // We construct a unique, secure path for each user's document.
-      // This path matches the new Firebase Storage security rules.
-      final String fileName = '${documentType}_${DateTime.now().millisecondsSinceEpoch}.jpg';
-      final String filePath = 'user_documents/${user.uid}/$fileName';
-
-      // 1. Create a reference to the path and upload the file
-      final ref = _storage.ref().child(filePath);
-      final uploadTask = ref.putFile(file);
-
-      // 2. Wait for the upload to complete
-      final snapshot = await uploadTask.whenComplete(() => {});
-
-      // 3. Get the public download URL for the file
-      final downloadUrl = await snapshot.ref.getDownloadURL();
-
-      // 4. Update the user's document in Firestore with the new URL
-      await _firestore.collection('users').doc(user.uid).update({
-        documentType: downloadUrl,
-      });
-
-      ScaffoldMessenger.of(context).showSnackBar(
-        SnackBar(content: Text("$documentType uploaded successfully!")),
-      );
-
-      return downloadUrl;
-
-    } on FirebaseException catch (e) {
-      // Handle potential errors, like permission denied
-      print("Error during file upload: ${e.code} - ${e.message}");
-      ScaffoldMessenger.of(context).showSnackBar(
-        SnackBar(content: Text("Upload failed: ${e.message}")),
-      );
-      return null;
-    }
+  Future<void> deleteByUrl(String url) async {
+    try { await _fs.refFromURL(url).delete(); } catch (_) {}
   }
 }

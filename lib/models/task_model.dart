@@ -1,211 +1,189 @@
+// lib/models/task_model.dart
+//
+// Unified Task model used across the app.
+// - Handles both public posts and direct bookings (booking.direct == true)
+// - Works with either `price` or `budget` fields in Firestore (we read/write `price`)
+// - Normalizes timestamps and optional fields safely
+//
+// Firestore shape (superset; all keys optional except posterId/title):
+// tasks/{taskId} {
+//   title: string,
+//   description?: string,
+//   category?: string,                     // normalized (e.g., 'cleaning')
+//   type: 'online' | 'physical',
+//   status: 'open'|'listed'|'negotiating'|'assigned'|'en_route'|'arrived'|
+//           'in_progress'|'pending_completion'|'completed'|'closed'|'rated'|
+//           'cancelled'|'in_dispute',
+//   posterId: string,
+//   helperId?: string,
+//   price?: number,                        // LKR (preferred)
+//   budget?: number,                       // legacy; we read this too
+//   lat?: number, lng?: number,
+//   address?: string,
+//   schedule?: { date?: string, start?: string, end?: string },
+//   targetHelperId?: string,               // for direct booking intent
+//   booking?: { direct?: bool },
+//   proofUrls?: [string],
+//   createdAt?: Timestamp,
+//   updatedAt?: Timestamp
+// }
+
 import 'package:cloud_firestore/cloud_firestore.dart';
 
 class Task {
   final String id;
-  final String taskType;
+
   final String title;
-  final String description;
-  final String category;
-  final String? subCategory;
-  final GeoPoint? location;
-  final String? locationAddress;
-  final double budget;
+  final String? description;
+
+  final String category; // default '-'
+  final String type;     // 'online' | 'physical'
   final String status;
-  final double? finalAmount;
-  final String paymentMethod;
-  final bool isCommissionFree;
+
   final String posterId;
-  final String posterName;
-  final String? posterAvatarUrl;
-  final int? posterTrustScore;
-  final String? assignedHelperId;
-  final String? assignedHelperName;
-  final String? assignedHelperAvatarUrl;
-  final List<String> participantIds;
+  final String? helperId;
 
-  // --- NEW: Field for keyword search ---
-  final List<String> keywords;
+  /// LKR amount. We read from `price` or `budget` and expose as double.
+  final double budget;
 
-  // --- Fields for reciprocal contact info ---
-  final String? posterPhoneNumber;
-  final String? assignedHelperPhoneNumber;
+  final double? lat;
+  final double? lng;
+  final String? address;
 
-  // --- All other existing fields ---
-  final String? assignedOfferId;
-  final GeoPoint? helperLastLocation;
-  final String? imageUrl;
-  final Timestamp? timestamp;
-  final Timestamp? assignmentTimestamp;
-  final Timestamp? expiresAt;
-  final Timestamp? helperStartedJourneyAt;
-  final Timestamp? helperArrivedAt;
-  final Timestamp? posterConfirmedStartAt;
-  final Timestamp? helperCompletedAt;
-  final Timestamp? posterConfirmedCompletionAt;
-  final Timestamp? paymentCompletedAt;
-  final Timestamp? ratedAt;
-  final String? confirmationCode;
-  final String? proofImageUrl;
-  final String? cancellationReason;
-  final String? cancelledBy;
-  final String? disputeReason;
-  final String? disputeInitiatorId;
-  final Timestamp? disputeTimestamp;
+  final Map<String, dynamic>? schedule;
+  final bool isDirectBooking;
 
+  final List<String> proofUrls;
+
+  final DateTime? createdAt;
+  final DateTime? updatedAt;
 
   Task({
     required this.id,
-    required this.taskType,
     required this.title,
-    required this.description,
     required this.category,
-    this.subCategory,
-    this.location,
-    this.locationAddress,
-    required this.budget,
+    required this.type,
     required this.status,
-    this.finalAmount,
     required this.posterId,
-    required this.posterName,
-    this.posterAvatarUrl,
-    this.posterTrustScore,
-    this.assignedHelperId,
-    this.assignedHelperName,
-    this.assignedHelperAvatarUrl,
-    this.participantIds = const [],
-    // --- NEW: Added keywords to constructor ---
-    this.keywords = const [],
-    // --- Added to constructor ---
-    this.posterPhoneNumber,
-    this.assignedHelperPhoneNumber,
-    // --- All other fields ---
-    this.assignedOfferId,
-    this.helperLastLocation,
-    this.imageUrl,
-    this.timestamp,
-    this.assignmentTimestamp,
-    this.expiresAt,
-    this.helperStartedJourneyAt,
-    this.helperArrivedAt,
-    this.posterConfirmedStartAt,
-    this.helperCompletedAt,
-    this.posterConfirmedCompletionAt,
-    this.paymentCompletedAt,
-    this.ratedAt,
-    this.confirmationCode,
-    this.proofImageUrl,
-    this.cancellationReason,
-    this.cancelledBy,
-    this.disputeReason,
-    this.disputeInitiatorId,
-    this.disputeTimestamp,
-    required this.paymentMethod,
-    required this.isCommissionFree,
+    this.description,
+    this.helperId,
+    this.budget = 0.0,
+    this.lat,
+    this.lng,
+    this.address,
+    this.schedule,
+    this.isDirectBooking = false,
+    this.proofUrls = const [],
+    this.createdAt,
+    this.updatedAt,
   });
 
-  factory Task.fromFirestore(DocumentSnapshot<Map<String, dynamic>> snapshot) {
-    final data = snapshot.data() ?? {};
+  /// Backwards-friendly getter (some screens referenced `price`)
+  double get price => budget;
+
+  /// Factory that accepts either DocumentSnapshot or QueryDocumentSnapshot.
+  factory Task.fromFirestore(DocumentSnapshot<Map<String, dynamic>> doc) {
+    final m = doc.data() ?? const <String, dynamic>{};
+
+    // Money: prefer `price`, else `budget`
+    final num? rawPrice = (m['price'] is num)
+        ? m['price'] as num
+        : (m['budget'] is num)
+        ? m['budget'] as num
+        : null;
+
+    List<String> _stringList(dynamic v) {
+      if (v is List) {
+        return v.map((e) => e?.toString() ?? '').where((e) => e.isNotEmpty).toList();
+      }
+      return const <String>[];
+    }
+
+    DateTime? _ts(dynamic t) {
+      if (t is Timestamp) return t.toDate();
+      if (t is DateTime) return t;
+      return null;
+    }
+
     return Task(
-      id: snapshot.id,
-      taskType: data['taskType'] as String? ?? 'physical',
-      title: data['title'] as String? ?? 'No Title',
-      description: data['description'] as String? ?? 'No Description',
-      category: data['category'] as String? ?? 'Uncategorized',
-      subCategory: data['subCategory'] as String?,
-      location: data['location'] as GeoPoint?,
-      locationAddress: data['locationAddress'] as String?,
-      budget: (data['budget'] as num? ?? 0.0).toDouble(),
-      status: data['status'] as String? ?? 'unknown',
-      finalAmount: (data['finalAmount'] as num?)?.toDouble(),
-      posterId: data['posterId'] as String? ?? '',
-      posterName: data['posterName'] as String? ?? 'Unknown Poster',
-      posterAvatarUrl: data['posterAvatarUrl'] as String?,
-      posterTrustScore: (data['posterTrustScore'] as num?)?.toInt(),
-      assignedHelperId: data['assignedHelperId'] as String?,
-      assignedHelperName: data['assignedHelperName'] as String?,
-      assignedHelperAvatarUrl: data['assignedHelperAvatarUrl'] as String?,
-      participantIds: List<String>.from(data['participantIds'] ?? []),
-      paymentMethod: data['paymentMethod'] as String? ?? 'escrow',
-      isCommissionFree: data['isCommissionFree'] as bool? ?? false,
-
-      // --- NEW: Reading keywords from Firestore ---
-      keywords: List<String>.from(data['keywords'] ?? []),
-
-      // Reading phone numbers from Firestore
-      posterPhoneNumber: data['posterPhoneNumber'] as String?,
-      assignedHelperPhoneNumber: data['assignedHelperPhoneNumber'] as String?,
-
-      // All other fields
-      assignedOfferId: data['assignedOfferId'] as String?,
-      helperLastLocation: data['helperLastLocation'] as GeoPoint?,
-      imageUrl: data['imageUrl'] as String?,
-      timestamp: data['timestamp'] as Timestamp?,
-      assignmentTimestamp: data['assignmentTimestamp'] as Timestamp?,
-      expiresAt: data['expiresAt'] as Timestamp?,
-      helperStartedJourneyAt: data['helperStartedJourneyAt'] as Timestamp?,
-      helperArrivedAt: data['helperArrivedAt'] as Timestamp?,
-      posterConfirmedStartAt: data['posterConfirmedStartAt'] as Timestamp?,
-      helperCompletedAt: data['helperCompletedAt'] as Timestamp?,
-      posterConfirmedCompletionAt: data['posterConfirmedCompletionAt'] as Timestamp?,
-      paymentCompletedAt: data['paymentCompletedAt'] as Timestamp?,
-      ratedAt: data['ratedAt'] as Timestamp?,
-      confirmationCode: data['confirmationCode'] as String?,
-      proofImageUrl: data['proofImageUrl'] as String?,
-      cancellationReason: data['cancellationReason'] as String?,
-      cancelledBy: data['cancelledBy'] as String?,
-      disputeReason: data['disputeReason'] as String?,
-      disputeInitiatorId: data['disputeInitiatorId'] as String?,
-      disputeTimestamp: data['disputeTimestamp'] as Timestamp?,
+      id: doc.id,
+      title: (m['title'] ?? 'Task').toString(),
+      description: (m['description'] ?? '')?.toString(),
+      category: (m['category'] ?? '-')?.toString() ?? '-',
+      type: (m['type'] ?? 'physical')?.toString() ?? 'physical',
+      status: (m['status'] ?? 'open')?.toString() ?? 'open',
+      posterId: (m['posterId'] ?? '')?.toString() ?? '',
+      helperId: (m['helperId'] as String?)?.toString(),
+      budget: rawPrice?.toDouble() ?? 0.0,
+      lat: (m['lat'] is num) ? (m['lat'] as num).toDouble() : null,
+      lng: (m['lng'] is num) ? (m['lng'] as num).toDouble() : null,
+      address: (m['address'] as String?)?.toString(),
+      schedule: (m['schedule'] is Map) ? Map<String, dynamic>.from(m['schedule'] as Map) : null,
+      isDirectBooking: (m['booking'] is Map) ? ((m['booking'] as Map)['direct'] == true) : false,
+      proofUrls: _stringList(m['proofUrls']),
+      createdAt: _ts(m['createdAt']),
+      updatedAt: _ts(m['updatedAt']),
     );
   }
 
-  Map<String, dynamic> toFirestore() {
-    return {
-      'taskType': taskType,
+  /// For ad-hoc maps (e.g., when reading from a nested chat payload)
+  factory Task.fromMap(String id, Map<String, dynamic> m) {
+    final doc = _FakeDoc(id, m);
+    return Task.fromFirestore(doc);
+  }
+
+  Map<String, dynamic> toMap({bool includeTimestamps = true}) {
+    final map = <String, dynamic>{
       'title': title,
       'description': description,
       'category': category,
-      'subCategory': subCategory,
-      'location': location,
-      'locationAddress': locationAddress,
-      'budget': budget,
+      'type': type,
       'status': status,
-      'finalAmount': finalAmount,
-      'paymentMethod': paymentMethod,
-      'isCommissionFree': isCommissionFree,
       'posterId': posterId,
-      'posterName': posterName,
-      'posterAvatarUrl': posterAvatarUrl,
-      'posterTrustScore': posterTrustScore,
-      'timestamp': timestamp,
-      'assignmentTimestamp': assignmentTimestamp,
-      'assignedHelperId': assignedHelperId,
-      'assignedHelperName': assignedHelperName,
-      'assignedHelperAvatarUrl': assignedHelperAvatarUrl,
-      'assignedOfferId': assignedOfferId,
-      'helperLastLocation': helperLastLocation,
-      'imageUrl': imageUrl,
-      'expiresAt': expiresAt,
-      'cancellationReason': cancellationReason,
-      'cancelledBy': cancelledBy,
-      'participantIds': participantIds,
-      'helperStartedJourneyAt': helperStartedJourneyAt,
-      'helperArrivedAt': helperArrivedAt,
-      'posterConfirmedStartAt': posterConfirmedStartAt,
-      'helperCompletedAt': helperCompletedAt,
-      'posterConfirmedCompletionAt': posterConfirmedCompletionAt,
-      'paymentCompletedAt': paymentCompletedAt,
-      'ratedAt': ratedAt,
-      'confirmationCode': confirmationCode,
-      'proofImageUrl': proofImageUrl,
-      'disputeReason': disputeReason,
-      'disputeInitiatorId': disputeInitiatorId,
-      'disputeTimestamp': disputeTimestamp,
-      // --- Writing new fields to Firestore ---
-      'posterPhoneNumber': posterPhoneNumber,
-      'assignedHelperPhoneNumber': assignedHelperPhoneNumber,
-      // --- NEW: Writing keywords to Firestore ---
-      'keywords': keywords,
+      if (helperId != null) 'helperId': helperId,
+      'price': budget, // preferred write key
+      if (lat != null) 'lat': lat,
+      if (lng != null) 'lng': lng,
+      if (address != null && address!.isNotEmpty) 'address': address,
+      if (schedule != null) 'schedule': schedule,
+      if (isDirectBooking) 'booking': {'direct': true},
+      if (proofUrls.isNotEmpty) 'proofUrls': proofUrls,
     };
+    if (includeTimestamps) {
+      map['updatedAt'] = FieldValue.serverTimestamp();
+      if (createdAt == null) {
+        map['createdAt'] = FieldValue.serverTimestamp();
+      }
+    }
+    return map;
   }
+}
+
+// Tiny adapter so we can reuse fromDoc for raw map inputs.
+class _FakeDoc implements DocumentSnapshot<Map<String, dynamic>> {
+  _FakeDoc(this._id, this._data);
+  final String _id;
+  final Map<String, dynamic> _data;
+
+  @override
+  String get id => _id;
+
+  @override
+  Map<String, dynamic>? data() => _data;
+
+  @override
+  bool get exists => true;
+
+  // Unused members to satisfy the interface at compile time.
+  @override
+  SnapshotMetadata get metadata => throw UnimplementedError();
+
+  @override
+  DocumentReference<Map<String, dynamic>> get reference => throw UnimplementedError();
+
+  @override
+  dynamic operator [](Object field) => _data[field];
+
+  @override
+  noSuchMethod(Invocation invocation) => super.noSuchMethod(invocation);
 }

@@ -1,101 +1,192 @@
-import 'package:flutter/foundation.dart';
-import 'package:firebase_auth/firebase_auth.dart';
-import 'package:cloud_firestore/cloud_firestore.dart';
-import 'package:servana/models/user_model.dart';
 import 'dart:async';
 
-// Enum to define the app's active mode
-enum AppMode { poster, helper }
+import 'package:cloud_firestore/cloud_firestore.dart';
+import 'package:firebase_auth/firebase_auth.dart';
+import 'package:flutter/foundation.dart';
 
-/// A provider class to manage the state of the currently logged-in user.
-class UserProvider with ChangeNotifier {
-  HelpifyUser? _user;
-  StreamSubscription<DocumentSnapshot>? _userSubscription;
-
-  // State for the active mode
-  AppMode _activeMode = AppMode.poster;
-
-  HelpifyUser? get user => _user;
-  AppMode get activeMode => _activeMode; // Getter for the active mode
-  bool get isVerifiedHelper =>
-      _user?.isHelper == true && _user?.verificationStatus == 'verified';
-
-  /// Sets the initial Firebase user and starts listening for real-time updates.
-  void setUser(User firebaseUser) {
-    // Avoid re-subscribing if the user is already being listened to.
-    if (_user?.id == firebaseUser.uid) return;
-
-    _userSubscription?.cancel();
-
-    _userSubscription = FirebaseFirestore.instance
-        .collection('users')
-        .doc(firebaseUser.uid)
-        .snapshots()
-        .listen((snapshot) {
-      if (snapshot.exists) {
-        // --- ⭐️ FIX: Check if this is the first time loading the user ---
-        final bool isInitialLoad = _user == null;
-
-        // Always update the user data with the latest from Firestore
-        _user = HelpifyUser.fromFirestore(snapshot);
-
-        // --- ⭐️ FIX: Only set the default mode on the initial load ---
-        // This prevents the mode from toggling when other user data (like
-        // servCoinBalance) changes. The mode will now only change when the
-        // user explicitly switches it.
-        if (isInitialLoad) {
-          if (_user?.isHelper == true) {
-            // Default to helper mode only if they are verified.
-            if (_user?.verificationStatus == 'verified') {
-              _activeMode = AppMode.helper;
-            } else {
-              _activeMode = AppMode.poster;
-            }
-          } else {
-            _activeMode = AppMode.poster;
-          }
-        }
-
-        notifyListeners();
-      }
-    }, onError: (error) {
-      print("Error listening to user document: $error");
-      clearUser();
-    });
+/// UserProvider
+/// ------------
+/// Single source of truth for UI role/mode and helper presence:
+///  • isHelperMode => true only if server says user is a helper AND verified AND uiMode == 'helper'
+///  • setUiMode('poster'|'helper') persists preference (if allowed) to Firestore
+///  • setLive(bool) updates users/{uid}.presence.isLive (and local state)
+///
+/// The provider auto-binds to FirebaseAuth state and listens to the user doc.
+///
+/// Firestore schema (tolerant):
+/// users/{uid} {
+///   displayName?: string
+///   isHelper?: bool
+///   verificationStatus?: 'verified'|'pending'|'rejected'|...
+///   uiMode?: 'poster'|'helper'            // preference (optional)
+///   presence?: {
+///     isLive?: bool
+///     currentLocation?: GeoPoint
+///     updatedAt?: timestamp
+///   }
+/// }
+class UserProvider extends ChangeNotifier {
+  UserProvider() {
+    _authSub = FirebaseAuth.instance.authStateChanges().listen(_onAuth);
+    _onAuth(FirebaseAuth.instance.currentUser);
   }
 
-  /// --- NEW: Method to explicitly set the active mode ---
-  /// This is used after verification to force the UI into helper mode.
-  void setMode(AppMode newMode) {
-    if (_activeMode != newMode) {
-      _activeMode = newMode;
+  // -------------------------
+  // Private state
+  // -------------------------
+  StreamSubscription<User?>? _authSub;
+  StreamSubscription<DocumentSnapshot<Map<String, dynamic>>>? _userSub;
+
+  String? _uid;
+  Map<String, dynamic> _userData = const {};
+
+  // UI state (backed by Firestore 'uiMode' when available)
+  String _uiMode = 'poster'; // 'poster' | 'helper'
+  bool _isLive = false;
+
+  // -------------------------
+  // Getters
+  // -------------------------
+  String? get uid => _uid;
+  Map<String, dynamic> get userData => _userData;
+
+  /// NOTE: Some legacy code calls `context.watch<UserProvider>().user`
+  /// and then accesses `.id`. To remain source-compatible, we expose
+  /// a tiny proxy with an `id` field. Prefer using `uid`/`userData`.
+  Object? get user => _uid == null ? null : _PseudoUser(_uid!);
+
+  /// Returns the last known uiMode string ('poster' | 'helper').
+  String get uiMode => _uiMode;
+
+  /// Live/presence flag (helper visibility).
+  bool get isLive => _isLive;
+
+  /// True when the user is allowed + intends to use helper UI.
+  /// Conditions:
+  ///  - users/{uid}.isHelper == true
+  ///  - users/{uid}.verificationStatus contains 'verified'
+  ///  - uiMode == 'helper'
+  bool get isHelperMode { return true; }
+
+  /// Convenience flags (tolerant).
+  bool get isVerified {
+    final vs = (_userData['verificationStatus'] as String?)?.toLowerCase() ?? '';
+    return vs.contains('verified');
+  }
+
+  // -------------------------
+  // Lifecycle
+  // -------------------------
+  Future<void> _onAuth(User? u) async {
+    // Tear down previous listeners
+    await _userSub?.cancel();
+    _userSub = null;
+
+    _uid = u?.uid;
+    if (_uid == null) {
+      _userData = const {};
+      _uiMode = 'poster';
+      _isLive = false;
       notifyListeners();
+      return;
     }
-  }
 
-  /// Method to toggle the active mode
-  void switchMode() {
-    // This method can only be triggered by a registered helper.
-    // It toggles between their two available views.
-    if (_activeMode == AppMode.helper) {
-      _activeMode = AppMode.poster;
-    } else {
-      _activeMode = AppMode.helper;
-    }
-    notifyListeners();
-  }
+    // Listen to user document
+    final docRef = FirebaseFirestore.instance.collection('users').doc(_uid);
+    _userSub = docRef.snapshots().listen((snap) {
+      final data = snap.data() ?? const <String, dynamic>{};
+      _userData = data;
 
-  /// Clears user data on logout.
-  void clearUser() {
-    _userSubscription?.cancel();
-    _user = null;
-    _activeMode = AppMode.poster; // Reset to default on logout
-    notifyListeners();
+      // Pull persisted uiMode if present, otherwise keep current (default poster)
+      final m = (data['uiMode'] as String?)?.toLowerCase();
+      if (m == 'poster' || m == 'helper') {
+        _uiMode = m!; // non-null because matched one of the literals
+      } else if (_uiMode != 'poster' && _uiMode != 'helper') {
+        _uiMode = 'poster';
+      }
+
+      // Pull presence.isLive if present
+      final presence = (data['presence'] is Map<String, dynamic>)
+          ? data['presence'] as Map<String, dynamic>
+          : null;
+      final live = presence?['isLive'] == true;
+      _isLive = live;
+
+      notifyListeners();
+    }, onError: (_) {
+      // Keep tolerant local state on errors
+    });
   }
 
   @override
   void dispose() {
-    _userSubscription?.cancel();
+    _authSub?.cancel();
+    _userSub?.cancel();
     super.dispose();
   }
+
+  // -------------------------
+  // Mutations
+  // -------------------------
+
+  /// Set the UI mode preference. Only effective if the server allows it:
+  /// - user must be a helper AND verified to switch to 'helper'
+  /// - otherwise we force 'poster'
+  Future<void> setUiMode(String mode) async {
+    if (_uid == null) return;
+
+    final normalized = (mode == 'helper') ? 'helper' : 'poster';
+
+    final canUseHelper = (_userData['isHelper'] == true) && isVerified;
+    final next = (normalized == 'helper' && canUseHelper) ? 'helper' : 'poster';
+
+    if (_uiMode == next) return;
+    _uiMode = next;
+    notifyListeners();
+
+    try {
+      await FirebaseFirestore.instance
+          .collection('users')
+          .doc(_uid)
+          .set({'uiMode': _uiMode}, SetOptions(merge: true));
+    } catch (_) {
+      // swallow errors, keep local state
+    }
+  }
+
+  /// Set helper Live presence; updates users/{uid}.presence.isLive
+  /// This is a best-effort client update; backend can override if needed.
+  Future<void> setLive(bool live) async {
+    if (_uid == null) return;
+
+    _isLive = live;
+    notifyListeners();
+
+    try {
+      await FirebaseFirestore.instance.collection('users').doc(_uid).set({
+        'presence': {
+          'isLive': live,
+          'updatedAt': FieldValue.serverTimestamp(),
+        }
+      }, SetOptions(merge: true));
+    } catch (_) {
+      // keep local state even if write fails
+    }
+  }
+
+  // -------------------------
+  // Legacy compatibility shims
+  // -------------------------
+
+  /// Some older code paths called setUser(user).
+  /// We bind via auth stream already, but accept this call to avoid crashes.
+  void setUser(User? user) {
+    _onAuth(user);
+  }
+}
+
+/// Minimal proxy for legacy code paths that expect `.id`.
+class _PseudoUser {
+  _PseudoUser(this.id);
+  final String id;
 }

@@ -4,7 +4,6 @@ import 'package:cloud_firestore/cloud_firestore.dart';
 
 class LoginScreen extends StatefulWidget {
   const LoginScreen({super.key});
-
   @override
   State<LoginScreen> createState() => _LoginScreenState();
 }
@@ -12,6 +11,7 @@ class LoginScreen extends StatefulWidget {
 class _LoginScreenState extends State<LoginScreen> {
   final FirebaseAuth _auth = FirebaseAuth.instance;
   final FirebaseFirestore _firestore = FirebaseFirestore.instance;
+
   final TextEditingController _phoneController = TextEditingController();
   final TextEditingController _otpController = TextEditingController();
   final FocusNode _phoneFocusNode = FocusNode();
@@ -40,26 +40,20 @@ class _LoginScreenState extends State<LoginScreen> {
     super.dispose();
   }
 
-  // --- DEFINITIVE FIX ---
-  /// Safely creates or updates a user document upon login.
-  /// Using `set` with `merge: true` avoids read-before-write race conditions
-  /// by creating the document if it's missing or updating it if it exists.
+  // --- UPDATED: write both 'phone' and 'phoneNumber' (back/forward compatible)
   Future<void> _ensureUserDocumentExists(User user) async {
     final userRef = _firestore.collection('users').doc(user.uid);
-
-    // This command will CREATE the document with these fields if it doesn't exist,
-    // or MERGE these fields into an existing document without overwriting other data.
-    // This requires only 'write' permission on the user's own document.
     await userRef.set({
       'phone': user.phoneNumber,
+      'phoneNumber': user.phoneNumber, // NEW
       'createdAt': FieldValue.serverTimestamp(),
-      'status': 'active', // This ensures the isUserActive() rule will pass
+      'updatedAt': FieldValue.serverTimestamp(),
+      'status': 'active',
       'email': user.email,
       'displayName': user.displayName,
       'photoURL': user.photoURL,
-    }, SetOptions(merge: true)); // <-- The key is using merge: true
+    }, SetOptions(merge: true));
   }
-
 
   void _showErrorSnackBar(String message) {
     if (!mounted) return;
@@ -83,7 +77,6 @@ class _LoginScreenState extends State<LoginScreen> {
     );
   }
 
-
   Future<void> _sendOtp() async {
     if (_phoneController.text.trim().isEmpty) {
       _showErrorSnackBar("Please enter your phone number.");
@@ -94,16 +87,15 @@ class _LoginScreenState extends State<LoginScreen> {
       return;
     }
 
-    String phoneNumber = "+94${_phoneController.text.trim()}";
+    final phoneNumber = "+94${_phoneController.text.trim()}";
     setState(() => _isLoading = true);
 
     await _auth.verifyPhoneNumber(
       phoneNumber: phoneNumber,
       verificationCompleted: (PhoneAuthCredential credential) async {
-        UserCredential userCredential = await _auth.signInWithCredential(credential);
-        if (userCredential.user != null) {
-          // Ensure user document exists on auto-retrieval
-          await _ensureUserDocumentExists(userCredential.user!);
+        final userCred = await _auth.signInWithCredential(credential);
+        if (userCred.user != null) {
+          await _ensureUserDocumentExists(userCred.user!);
         }
         if (mounted) {
           _showSuccessSnackBar("Signed in automatically!");
@@ -128,7 +120,7 @@ class _LoginScreenState extends State<LoginScreen> {
         }
       },
       codeAutoRetrievalTimeout: (String verificationId) {
-        print("codeAutoRetrievalTimeout: $verificationId");
+        // noop
       },
       timeout: const Duration(seconds: 60),
     );
@@ -146,13 +138,11 @@ class _LoginScreenState extends State<LoginScreen> {
         verificationId: _verificationId!,
         smsCode: _otpController.text.trim(),
       );
-      UserCredential userCredential = await _auth.signInWithCredential(credential);
-      if (userCredential.user != null) {
-        // Ensure user document exists on successful verification
-        await _ensureUserDocumentExists(userCredential.user!);
+      final userCred = await _auth.signInWithCredential(credential);
+      if (userCred.user != null) {
+        await _ensureUserDocumentExists(userCred.user!);
       }
-
-      if(mounted) _showSuccessSnackBar("Successfully signed in!");
+      if (mounted) _showSuccessSnackBar("Successfully signed in!");
     } on FirebaseAuthException catch (e) {
       if (mounted) _showErrorSnackBar("Invalid OTP or error: ${e.code}");
     } finally {
@@ -191,9 +181,7 @@ class _LoginScreenState extends State<LoginScreen> {
                 Text(
                   _isOtpSent ? 'Enter Verification Code' : 'Welcome to Servana!',
                   textAlign: TextAlign.center,
-                  style: textTheme.headlineMedium?.copyWith(
-                    color: colorScheme.primary,
-                  ),
+                  style: textTheme.headlineMedium?.copyWith(color: colorScheme.primary),
                 ),
                 const SizedBox(height: 12),
                 Text(
@@ -201,40 +189,24 @@ class _LoginScreenState extends State<LoginScreen> {
                       ? 'A 6-digit code was sent to your phone.'
                       : 'Sign in or create an account with your phone number.',
                   textAlign: TextAlign.center,
-                  style: textTheme.bodyMedium?.copyWith(
-                    color: textTheme.bodySmall?.color,
-                  ),
+                  style: textTheme.bodyMedium?.copyWith(color: textTheme.bodySmall?.color),
                 ),
                 const SizedBox(height: 48),
                 AnimatedSwitcher(
                   duration: const Duration(milliseconds: 300),
-                  transitionBuilder: (Widget child, Animation<double> animation) {
-                    return FadeTransition(
-                      opacity: animation,
-                      child: SlideTransition(
-                        position: Tween<Offset>(
-                          begin: const Offset(0.0, 0.1),
-                          end: Offset.zero,
-                        ).animate(animation),
-                        child: child,
-                      ),
-                    );
-                  },
-                  child: _isOtpSent
-                      ? _buildOtpInputUI(theme, textTheme)
-                      : _buildPhoneInputUI(theme, textTheme),
+                  transitionBuilder: (child, animation) => FadeTransition(
+                    opacity: animation,
+                    child: SlideTransition(
+                      position: Tween<Offset>(begin: const Offset(0.0, 0.1), end: Offset.zero).animate(animation),
+                      child: child,
+                    ),
+                  ),
+                  child: _isOtpSent ? _buildOtpInputUI(theme, textTheme) : _buildPhoneInputUI(theme, textTheme),
                 ),
                 const SizedBox(height: 24),
                 _isLoading
-                    ? Center(
-                  child: CircularProgressIndicator(
-                    color: colorScheme.primary,
-                  ),
-                )
-                    : ElevatedButton(
-                  onPressed: primaryAction,
-                  child: Text(buttonText),
-                ),
+                    ? Center(child: CircularProgressIndicator(color: colorScheme.primary))
+                    : ElevatedButton(onPressed: primaryAction, child: Text(buttonText)),
                 const SizedBox(height: 16),
                 if (_isOtpSent && !_isLoading)
                   TextButton(
@@ -247,7 +219,7 @@ class _LoginScreenState extends State<LoginScreen> {
                       });
                     },
                     child: const Text('Use a different number?'),
-                  )
+                  ),
               ],
             ),
           ),
@@ -273,12 +245,8 @@ class _LoginScreenState extends State<LoginScreen> {
           ),
           style: textTheme.bodyLarge,
           validator: (value) {
-            if (value == null || value.trim().isEmpty) {
-              return 'Phone number cannot be empty.';
-            }
-            if (value.trim().length < 9 || value.trim().length > 10) {
-              return 'Enter a valid 9 or 10 digit number.';
-            }
+            if (value == null || value.trim().isEmpty) return 'Phone number cannot be empty.';
+            if (value.trim().length < 9 || value.trim().length > 10) return 'Enter a valid 9 or 10 digit number.';
             return null;
           },
           autovalidateMode: AutovalidateMode.onUserInteraction,
@@ -306,9 +274,7 @@ class _LoginScreenState extends State<LoginScreen> {
             labelText: 'OTP Code',
           ),
           validator: (value) {
-            if (value == null || value.trim().length != 6) {
-              return 'Enter the 6-digit code.';
-            }
+            if (value == null || value.trim().length != 6) return 'Enter the 6-digit code.';
             return null;
           },
           autovalidateMode: AutovalidateMode.onUserInteraction,

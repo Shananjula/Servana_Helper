@@ -1,0 +1,2169 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <link type="text/css" rel="stylesheet" href="https://www.gstatic.com/firebasejs/ui/6.0.1/firebase-ui-auth.css" />
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Servana Admin Panel - Modernized</title>
+    <script src="https://cdn.tailwindcss.com"></script>
+    <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&display=swap" rel="stylesheet">
+    <script src="https://cdn.jsdelivr.net/npm/chart.js"></script>
+    <link rel="stylesheet" href="https://unpkg.com/leaflet@1.9.4/dist/leaflet.css" integrity="sha256-p4NxAoJBhIIN+hmNHrzRCf9tD/miZyoHS5obTRR9BMY=" crossorigin=""/>
+    <script src="https://unpkg.com/leaflet@1.9.4/dist/leaflet.js" integrity="sha256-20nQCchB9co0qIjJZRGuk2/Z9VM+kNiyxNV1lvTlZBo=" crossorigin=""></script>
+    <style>
+        body { font-family: 'Inter', sans-serif; }
+        .hidden-content { display: none; }
+        .modal-overlay {
+            transition: opacity 0.3s ease-in-out;
+            z-index: 50;
+            position: fixed;
+            inset: 0;
+            background-color: rgba(0, 0, 0, 0.5);
+            display: flex;
+            align-items: center;
+            justify-content: center;
+            padding: 1rem;
+        }
+        .modal-container {
+            transition: all 0.3s ease-in-out;
+            background-color: white;
+            border-radius: 0.5rem;
+            box-shadow: 0 25px 50px -12px rgba(0, 0, 0, 0.25);
+            width: 100%;
+            max-width: 42rem;
+        }
+        .loader {
+            border: 4px solid #f3f3f3;
+            border-top: 4px solid #14b8a6; /* teal-500 */
+            border-radius: 50%;
+            width: 40px;
+            height: 40px;
+            animation: spin 1s linear infinite;
+        }
+        @keyframes spin {
+            0% { transform: rotate(0deg); }
+            100% { transform: rotate(360deg); }
+        }
+        button:disabled { opacity: 0.5; cursor: not-allowed; }
+        .toast {
+            transition: all 0.5s ease-in-out;
+        }
+        .nav-link.active {
+            background-color: #ccfbf1; /* teal-100 */
+            color: #0d9488; /* teal-700 */
+            font-weight: 700;
+        }
+        #map { height: 600px; }
+
+        .zoomable { cursor: zoom-in; transition: transform 0.2s ease; }
+        .zoomable.zoomed { cursor: zoom-out; transform: scale(2); }
+        .zoom-wrap { overflow: auto; }
+    </style>
+</head>
+<body class="bg-gray-100 text-gray-800">
+
+<div id="auth-container" class="flex items-center justify-center h-screen">
+    <div class="w-full max-w-md p-8 space-y-6 bg-white rounded-lg shadow-md">
+        <h2 class="text-2xl font-bold text-center text-gray-800">Servana Admin Login</h2>
+        <div id="auth-loader" class="flex justify-center items-center flex-col">
+            <div class="loader"></div>
+            <p id="auth-status-text" class="mt-2 text-gray-500">Initializing...</p>
+        </div>
+        <div id="firebaseui-auth-container"></div>
+    </div>
+</div>
+
+<div id="main-app" class="flex h-screen hidden-content">
+    <aside class="w-64 bg-white shadow-lg flex flex-col z-10">
+        <div class="p-6 text-2xl font-bold text-teal-600 border-b">Servana Admin</div>
+        <nav id="sidebar-nav" class="flex-1 p-4 space-y-2">
+            <a href="#" data-target="dashboard" class="nav-link flex items-center p-3 text-lg active"><svg class="w-6 h-6 mr-3" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" d="M9 17v-2m3 2v-4m3 4v-6m2 10H7a2 2 0 01-2-2V5a2 2 0 012-2h5.586a1 1 0 01.707.293l5.414 5.414a1 1 0 01.293.707V19a2 2 0 01-2 2z"></path></svg>Dashboard</a>
+            <a href="#" data-target="live-map" class="nav-link flex items-center p-3 text-lg text-gray-600 hover:bg-gray-100 rounded-lg"><svg class="w-6 h-6 mr-3" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M17.657 16.657L13.414 20.9a1.998 1.998 0 01-2.827 0l-4.244-4.243a8 8 0 1111.314 0z"></path><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M15 11a3 3 0 11-6 0 3 3 0 016 0z"></path></svg>Live Map</a>
+            <a href="#" data-target="users" class="nav-link flex items-center p-3 text-lg text-gray-600 hover:bg-gray-100 rounded-lg"><svg class="w-6 h-6 mr-3" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" d="M12 4.354a4 4 0 110 5.292M15 21H3v-1a6 6 0 0112 0v1zm0 0h6v-1a6 6 0 00-9-5.197M15 21a6 6 0 00-9-5.197m0 0A10.004 10.004 0 003 15"></path></svg>Users</a>
+            <a href="#" data-target="tasks" class="nav-link flex items-center p-3 text-lg text-gray-600 hover:bg-gray-100 rounded-lg"><svg class="w-6 h-6 mr-3" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" d="M9 5H7a2 2 0 00-2 2v12a2 2 0 002 2h10a2 2 0 002-2V7a2 2 0 00-2-2h-2M9 5a2 2 0 002 2h2a2 2 0 002-2M9 5a2 2 0 012-2h2a2 2 0 012 2"></path></svg>Tasks</a>
+            <a href="#" data-target="verification" class="nav-link flex items-center p-3 text-lg text-gray-600 hover:bg-gray-100 rounded-lg"><svg class="w-6 h-6 mr-3" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" d="M9 12l2 2 4-4m5.618-4.016A11.955 11.955 0 0112 2.944a11.955 11.955 0 01-8.618 3.04A12.02 12.02 0 003 9c0 5.591 3.824 10.29 9 11.622 5.176-1.332 9-6.03 9-11.622 0-1.042-.133-2.052-.382-3.016z"></path></svg>Verification</a>
+            <a href="#" data-target="eligibility" class="nav-link flex items-center p-3 text-lg text-gray-600 hover:bg-gray-100 rounded-lg">
+                <svg class="w-6 h-6 mr-3" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                    <path stroke-linecap="round" stroke-linejoin="round" d="M9 12l2 2 4-4m5.618-4.016A11.955 11.955 0 0112 2.944a11.955 11.955 0 01-8.618 3.04A12.02 12.02 0 003 9c0 5.591 3.824 10.29 9 11.622 5.176-1.332 9-6.03 9-11.622 0-1.042-.133-2.052-.382-3.016z"></path>
+                </svg>
+                Category Eligibility
+            </a>
+
+            <a href="#" data-target="interviews" class="nav-link flex items-center p-3 text-lg text-gray-600 hover:bg-gray-100 rounded-lg"><svg class="w-6 h-6 mr-3" fill="none" stroke="currentColor" viewBox="0 0 24 24" stroke-width="1.5"><path stroke-linecap="round" stroke-linejoin="round" d="M7.5 8.25h9m-9 3H12m-9.75 1.51c0 1.6 1.123 2.994 2.707 3.227 1.129.166 2.27.293 3.423.379.35.026.67.21.865.501L12 21l2.755-4.133a1.14 1.14 0 01.865-.501 48.172 48.172 0 003.423-.379c1.584-.233 2.707-1.626 2.707-3.228V6.741c0-1.602-1.123-2.995-2.707-3.228A48.394 48.394 0 0012 3c-2.392 0-4.744.175-7.043.513C3.373 3.746 2.25 5.14 2.25 6.741v6.018z" /></svg>Interviews</a>
+            <a href="#" data-target="reports" class="nav-link flex items-center p-3 text-lg text-gray-600 hover:bg-gray-100 rounded-lg"><svg class="w-6 h-6 mr-3" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M3 21v-4m0 0V5a2 2 0 012-2h6.5l1 1H21l-3 6 3 6H8.5l-1-1H5a2 2 0 00-2 2zm9-13.5V9"></path></svg>Reports</a>
+            <a href="#" data-target="community-watch" class="nav-link flex items-center p-3 text-lg text-gray-600 hover:bg-gray-100 rounded-lg"><svg class="w-6 h-6 mr-3" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M21 21l-6-6m2-5a7 7 0 11-14 0 7 7 0 0114 0z"></path></svg>Community Watch</a>
+            <a href="#" data-target="settings" class="nav-link flex items-center p-3 text-lg text-gray-600 hover:bg-gray-100 rounded-lg"><svg class="w-6 h-6 mr-3" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M10.325 4.317c.426-1.756 2.924-1.756 3.35 0a1.724 1.724 0 002.573 1.066c1.543-.94 3.31.826 2.37 2.37a1.724 1.724 0 001.065 2.572c1.756.426 1.756 2.924 0 3.35a1.724 1.724 0 00-1.066 2.573c.94 1.543-.826 3.31-2.37 2.37a1.724 1.724 0 00-2.572 1.065c-.426 1.756-2.924 1.756-3.35 0a1.724 1.724 0 00-2.573-1.066c-1.543.94-3.31-.826-2.37-2.37a1.724 1.724 0 00-1.065-2.572c-1.756-.426-1.756-2.924 0-3.35a1.724 1.724 0 001.066-2.573c-.94-1.543.826-3.31 2.37-2.37.996.608 2.296.07 2.572-1.065z"></path><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M15 12a3 3 0 11-6 0 3 3 0 016 0z"></path></svg>Settings</a>
+        </nav>
+        <div class="p-4 border-t">
+            <button data-action="logout" class="w-full flex items-center justify-center p-3 text-lg text-red-600 hover:bg-red-100 rounded-lg">
+                <svg class="w-6 h-6 mr-3" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M17 16l4-4m0 0l-4-4m4 4H7m6 4v1a3 3 0 01-3 3H6a3 3 0 01-3-3V7a3 3 0 013-3h4a3 3 0 013 3v1"></path></svg>
+                Logout
+            </button>
+        </div>
+    </aside>
+
+    <main id="main-content" class="flex-1 p-8 overflow-y-auto">
+    </main>
+</div>
+
+<div id="details-modal" class="modal-overlay hidden-content opacity-0" style="z-index: -10;">
+    <div class="modal-container transform scale-95">
+        <div class="flex justify-between items-center p-4 border-b"><h3 id="modal-title" class="text-2xl font-bold">Details</h3><button data-action="closeModal" class="text-gray-500 hover:text-gray-800 text-3xl">&times;</button></div>
+        <div id="modal-body" class="p-6 max-h-[70vh] overflow-y-auto"></div>
+        <div id="modal-footer" class="p-4 bg-gray-50 border-t text-right space-x-2"></div>
+    </div>
+</div>
+
+<div id="toast-container" class="fixed top-5 right-5 z-[100] space-y-2 w-full max-w-xs"></div>
+
+<script src="https://www.gstatic.com/firebasejs/9.15.0/firebase-app-compat.js"></script>
+<script src="https://www.gstatic.com/firebasejs/9.15.0/firebase-auth-compat.js"></script>
+<script src="https://www.gstatic.com/firebasejs/9.15.0/firebase-firestore-compat.js"></script>
+<script src="https://www.gstatic.com/firebasejs/9.15.0/firebase-storage-compat.js"></script>
+<script src="https://www.gstatic.com/firebasejs/ui/6.0.1/firebase-ui-auth.js"></script>
+<script src="https://www.gstatic.com/firebasejs/9.15.0/firebase-functions-compat.js"></script>
+
+<script type="module">
+    // --- Firebase Configuration ---
+    const firebaseConfig = {
+      apiKey: "AIzaSyBS02g3Gtbz_v_cw9KxOffknGQGsvZKK_s",
+      authDomain: "helpify-flutter.firebaseapp.com",
+      projectId: "helpify-flutter",
+      storageBucket: "helpify-flutter.appspot.com",
+      messagingSenderId: "657614790732",
+      appId: "1:657614790732:web:952d8c55eea79bd77614e9",
+      measurementId: "G-L51PN5NVM2"
+    };
+
+    // --- Gemini API Configuration ---
+    const GEMINI_API_KEY = "AIzaSyBp4DPWJ1VgynLc-4NCcTHMdYJmmQxsnx0";
+
+    // --- Initialize Firebase ---
+    const app = firebase.initializeApp(firebaseConfig);
+    const auth = firebase.auth();
+    const db = firebase.firestore();
+    const functions = firebase.app().functions();
+
+    console.log('[Admin] Firebase initialized', firebaseConfig.projectId);
+    const ui = new firebaseui.auth.AuthUI(auth);
+
+    // --- Safety fallback: show FirebaseUI if auth state is slow ---
+    document.addEventListener('DOMContentLoaded', () => {
+      try {
+        const ac = document.getElementById('auth-container');
+        const uiC = document.getElementById('firebaseui-auth-container');
+        const loader = document.getElementById('auth-loader');
+        if (ac && uiC && loader) {
+          // If main app is hidden and UI area is empty, render the FirebaseUI widget
+          const mainApp = document.getElementById('main-app');
+          const widgetEmpty = !uiC.hasChildNodes();
+          const mainHidden = !mainApp || getComputedStyle(mainApp).display === 'none';
+          if (widgetEmpty && mainHidden) {
+            ac.style.display = 'flex';
+            uiC.style.display = 'block';
+            loader.style.display = 'none';
+            try {
+              // Only start if ui global exists
+              if (typeof ui !== 'undefined') {
+                ui.start('#firebaseui-auth-container', {
+                  signInOptions: [{ provider: firebase.auth.PhoneAuthProvider.PROVIDER_ID, defaultCountry: 'LK' }],
+                  signInSuccessUrl: '#',
+                  callbacks: { signInSuccessWithAuthResult: () => false }
+                });
+              }
+            } catch (e) { console.warn('UI start fallback failed', e); }
+          }
+        }
+      } catch (e) { console.warn('DOM fallback failed', e); }
+    });
+
+
+    // --- Global State & Unsubscribe Listeners ---
+    let state = {
+        users: [],
+        tasks: [],
+        verifications: [],
+        reports: [],
+        interviews: [],
+        transactions: [],
+        disputes: [],
+        payouts: [],
+        campaigns: [],
+        eligibility: [],
+        settings: {},
+        proofs: [],
+        categories: [],
+        basicDocs: [],
+    };
+    let listeners = [];
+    let charts = {};
+    let mapStuff = { map: null, markers: {} };
+
+    // --- UI Elements ---
+    const authContainer = document.getElementById('auth-container');
+    const mainApp = document.getElementById('main-app');
+    const mainContent = document.getElementById('main-content');
+    const sidebarNav = document.getElementById('sidebar-nav');
+    const authStatusText = document.getElementById('auth-status-text');
+
+    // --- Toast Notification System ---
+    function showToast(message, isError = false) {
+        const toastContainer = document.getElementById('toast-container');
+        if (!toastContainer) return;
+        const toastId = 'toast-' + Date.now();
+        const bgColor = isError ? 'bg-red-600' : 'bg-green-600';
+        const toastElement = document.createElement('div');
+        toastElement.id = toastId;
+        toastElement.className = `toast p-4 text-white rounded-lg shadow-lg transform translate-x-full opacity-0 ${bgColor}`;
+        toastElement.textContent = message;
+        toastContainer.appendChild(toastElement);
+        requestAnimationFrame(() => {
+            toastElement.classList.remove('translate-x-full', 'opacity-0');
+        });
+        setTimeout(() => {
+            toastElement.classList.add('opacity-0');
+            toastElement.addEventListener('transitionend', () => toastElement.remove());
+        }, 4000);
+    }
+
+    // --- Auth Handling ---
+    let _authFired = false;
+    setTimeout(() => {
+      try {
+        if (!_authFired) {
+          const authLoader = document.getElementById('auth-loader');
+          const firebaseUiContainer = document.getElementById('firebaseui-auth-container');
+          const authStatusText = document.getElementById('auth-status-text');
+          if (authStatusText) authStatusText.textContent = 'Connecting took too long. Showing sign-in…';
+          if (authLoader) authLoader.style.display = 'none';
+          if (firebaseUiContainer) firebaseUiContainer.style.display = 'block';
+        }
+      } catch (e) { console.warn('auth watchdog failed', e); }
+    }, 6000);
+
+    auth.onAuthStateChanged(async (user) => {
+        _authFired = true;
+        const authLoader = document.getElementById('auth-loader');
+        const firebaseUiContainer = document.getElementById('firebaseui-auth-container');
+        if (user) {
+            authStatusText.textContent = 'Verifying admin status...';
+            authLoader.style.display = 'flex';
+            firebaseUiContainer.style.display = 'none';
+            try {
+                const userDocRef = db.collection('users').doc(user.uid);
+                const userDoc = await userDocRef.get();
+                if (userDoc.exists && userDoc.data().isAdmin === true) {
+                    authContainer.style.display = 'none';
+                    mainApp.style.display = 'flex';
+                    initializeAdminPanel();
+                } else {
+                    showToast('Access Denied. You are not an administrator.', true);
+                    await auth.signOut();
+                }
+            } catch (error) {
+                console.error("Error checking admin status:", error);
+                showToast("An error occurred while verifying your admin status.", true);
+                await auth.signOut();
+            }
+        } else {
+            cleanupListeners();
+            authLoader.style.display = 'none';
+            firebaseUiContainer.style.display = 'block';
+            authContainer.style.display = 'flex';
+            mainApp.style.display = 'none';
+            ui.start('#firebaseui-auth-container', {
+                signInOptions: [{ provider: firebase.auth.PhoneAuthProvider.PROVIDER_ID, defaultCountry: 'LK' }],
+                signInSuccessUrl: '#',
+                callbacks: { signInSuccessWithAuthResult: () => false }
+            });
+        }
+    });
+
+
+    function mergeVerificationLists(oldRequests, newDocs, users) {
+        const byId = {};
+        const userNameMap = {};
+        (users || []).forEach(u => userNameMap[u.id] = u.displayName || u.phoneNumber || 'User');
+
+        (oldRequests || []).forEach(v => {
+            const id = v.id || v.userId || v.uid;
+            if (!id) return;
+            byId[id] = { ...v, id: id, userId: v.userId || id, userName: v.userName || userNameMap[id] };
+        });
+
+        (newDocs || []).forEach(doc => {
+            const id = doc.id || doc.userId;
+            if (!id) return;
+            const existing = byId[id] || {};
+            const status = doc.status || existing.status || 'pending';
+            const submittedAt = doc.resubmittedAt || doc.updatedAt || existing.submittedAt;
+            byId[id] = {
+                ...existing,
+                id,
+                userId: id,
+                userName: existing.userName || userNameMap[id],
+                status,
+                submittedAt: submittedAt,
+                documents: existing.documents || doc.documents || null,
+                // Manually add the fields from the new doc structure
+                nicBackUrl: doc.nicBackUrl,
+                nicFrontUrl: doc.nicFrontUrl,
+                policeUrl: doc.policeUrl,
+                selfieUrl: doc.selfieUrl
+            };
+        });
+
+        return Object.values(byId);
+    }
+
+    // --- Diagnostics ---
+    window.addEventListener('error', (e) => { try { showToast('JS Error: ' + (e.message || e.error), true); } catch(_){} });
+    window.addEventListener('unhandledrejection', (e) => { try { showToast('Promise rejection: ' + (e.reason && e.reason.message ? e.reason.message : e.reason), true); } catch(_){} });
+
+    // --- Verification helpers ---
+    async function markVerificationNeedsMoreInfo(userId, keys, requireAll) {
+        // keys: array of doc keys to reupload (e.g., ['selfie','nic_front']).
+        // If none selected, we mark the whole set.
+        const payload = {
+            status: 'needs_more_info',
+            requestedAt: firebase.firestore.FieldValue.serverTimestamp(),
+            updatedAt: firebase.firestore.FieldValue.serverTimestamp(),
+            required: requireAll ? ['all'] : keys
+        };
+        const txRef = db.collection('verifications').doc(userId);
+        try {
+            await db.runTransaction(async (transaction) => {
+                transaction.set(txRef, payload, { merge: true });
+                // If a verification_requests doc exists, update the latest one for this user too.
+                const q = await db.collection('verification_requests').where('userId','==', userId).orderBy('submittedAt','desc').limit(1).get();
+                if (!q.empty) {
+                    transaction.update(q.docs[0].ref, { status: 'needs_more_info', reviewerNote: (requireAll ? 'Please resubmit all documents.' : ('Please reupload: ' + keys.join(', '))), updatedAt: firebase.firestore.FieldValue.serverTimestamp() });
+                }
+                // Also mirror to the user document for app UI if needed
+                transaction.set(db.collection('users').doc(userId), { verificationStatus: 'needs_more_info', updatedAt: firebase.firestore.FieldValue.serverTimestamp() }, { merge: true });
+            });
+        } catch (e) {
+            console.error('markVerificationNeedsMoreInfo failed', e);
+            throw e;
+        }
+    }
+
+    // --- Core Panel Logic ---
+    function initializeAdminPanel() {
+        showLoaderInContent('Initializing Dashboard...');
+        attachRealtimeListeners();
+        renderDashboard();
+    }
+
+    function attachRealtimeListeners() {
+        cleanupListeners();
+        const collectionsToListen = {users: db.collection('users').orderBy('createdAt', 'desc'),
+            tasks: db.collection('tasks').orderBy('timestamp', 'desc'),
+            verifications: db.collection('verification_requests').orderBy('submittedAt', 'desc'),
+            reports: db.collection('reports').orderBy('reportedAt', 'desc'),
+            interviews: db.collection('interviewRequests').where('status', '==', 'pending').orderBy('requestTimestamp', 'desc'),
+            settings: db.collection('settings').doc('platform'),
+            verificationsV2: db.collection('verifications').orderBy('updatedAt', 'desc'),
+            transactions: db.collection('transactions').orderBy('createdAt', 'desc'),
+            disputes: db.collection('disputes').orderBy('createdAt', 'desc'),
+            payouts: db.collection('payouts').orderBy('createdAt', 'desc'),
+            campaigns: db.collection('campaigns').orderBy('createdAt', 'desc')};
+        Object.keys(collectionsToListen).forEach(key => {
+            const ref = collectionsToListen[key];
+            const unsub = ref.onSnapshot((snapshot) => {
+                if (key === 'settings') {
+                    state.settings = snapshot.exists ? snapshot.data() : { commissionRate: 5, freeTaskLimit: 3, referralBonus: 500 };
+                } else {
+                    state[key] = snapshot.docs.map(doc => ({ id: doc.id, ...doc.data() }));
+                }
+                const currentView = document.querySelector('.nav-link.active')?.dataset.target || 'dashboard';
+
+                // Normalize verification lists across legacy and new collections
+                try {
+                    state.verifications = mergeVerificationLists(state.verifications, state.verificationsV2, state.users);
+                } catch (e) { console.warn('merge verifications failed', e); }
+
+                renderView(currentView);
+            }, (error) => {
+                console.error(`Error listening to ${key}:`, error);
+                showToast(`Failed to load real-time data for ${key}.`, true);
+            });
+            listeners.push(unsub);
+        });
+
+        // const unsubEligibility = db
+        //   .collectionGroup('categoryEligibility')
+        //   .onSnapshot((snap) => {
+        //     state.eligibility = snap.docs.map((d) => {
+        //       const ref = d.ref;
+        //       const categoryId = ref.id;
+        //       const userId = ref.parent.parent.id;
+        //       return { id: `${userId}:${categoryId}`, userId, categoryId, _ref: ref, ...d.data() };
+        //     });
+        //     const currentView = document.querySelector('.nav-link.active')?.dataset.target || 'dashboard';
+        //     renderView(currentView);
+        //   }, (err) => {
+        //     console.error('eligibility listener error', err);
+        //     showToast('Failed to load category eligibility.', true);
+        //   });
+        // listeners.push(unsubEligibility);
+
+
+      // --- NEW: category_proofs (top-level aggregator docs) ---
+    const unsubProofs = db.collection('category_proofs')
+      .orderBy('updatedAt', 'desc')
+      .onSnapshot((snap) => {
+        state.proofs = snap.docs.map(d => ({ id: d.id, ...d.data() }));
+        const currentView = document.querySelector('.nav-link.active')?.dataset.target || 'dashboard';
+        renderView(currentView);
+      }, (err) => {
+        console.error('proofs listener error', err);
+        showToast('Failed to load proofs.', true);
+      });
+    listeners.push(unsubProofs);
+
+    // --- NEW: basic_docs (physical one-time verification) ---
+    const unsubBasic = db.collection('basic_docs')
+      .onSnapshot((snap) => {
+        state.basicDocs = snap.docs.map(d => ({ id: d.id, ...d.data() })); // id === uid
+        const currentView = document.querySelector('.nav-link.active')?.dataset.target || 'dashboard';
+        renderView(currentView);
+      }, (err) => {
+        console.error('basic_docs listener error', err);
+        showToast('Failed to load basic documents.', true);
+      });
+    listeners.push(unsubBasic);
+
+    // --- NEW: categories catalog (labels + mode) ---
+    const unsubCats = db.collection('categories')
+      .onSnapshot((snap) => {
+        state.categories = snap.docs.map(d => ({ id: d.id, ...d.data() }));
+        const currentView = document.querySelector('.nav-link.active')?.dataset.target || 'dashboard';
+        renderView(currentView);
+      }, (err) => {
+        console.error('categories listener error', err);
+        showToast('Failed to load categories.', true);
+      });
+    listeners.push(unsubCats);
+    }
+
+    function cleanupListeners() {
+        listeners.forEach(unsub => unsub());
+        listeners = [];
+        Object.values(charts).forEach(chart => chart.destroy());
+        charts = {};
+        if (mapStuff.map) {
+            mapStuff.map.remove();
+            mapStuff.map = null;
+            mapStuff.markers = {};
+        }
+    }
+
+    // --- Navigation ---
+    sidebarNav.addEventListener('click', (event) => {
+        const link = event.target.closest('.nav-link');
+        if (!link) return;
+        event.preventDefault();
+        document.querySelectorAll('.nav-link').forEach(l => l.classList.remove('active'));
+        link.classList.add('active');
+        const target = link.dataset.target;
+        renderView(target, true);
+    });
+
+    function renderView(view, showLoader = false) {
+        if (showLoader) {
+            showLoaderInContent(`Loading ${view}...`);
+        }
+        setTimeout(() => {
+            Object.values(charts).forEach(chart => chart.destroy());
+            charts = {};
+            if (view !== 'live-map' && mapStuff.map) {
+                 mapStuff.map.remove();
+                 mapStuff.map = null;
+                 mapStuff.markers = {};
+            }
+            switch(view) {
+                case 'dashboard': renderDashboard(); break;
+                case 'live-map': renderLiveMap(); break;
+                case 'users': renderUsers(); break;
+                case 'disputes': renderDisputes(); break;
+                case 'ledger': renderLedger(); break;
+                case 'payouts': renderPayouts(); break;
+                case 'campaigns': renderCampaigns(); break;
+                case 'flags': renderFlags(); break;
+                case 'tasks': renderTasks(); break;
+                case 'verification': renderVerifications(); break;
+                case 'eligibility': renderEligibility(); break;
+                case 'interviews': renderInterviews(); break;
+                case 'reports': renderReports(); break;
+                case 'community-watch': renderCommunityWatch(); break;
+                case 'settings': renderSettings(); break;
+            }
+        }, showLoader ? 50 : 0);
+    }
+
+    // --- Render Functions ---
+    function renderDashboard() {
+        const pendingVerifications = state.verifications.filter(v => ['pending','pending_review'].includes(v.status)).length;
+        const pendingReports = state.reports.filter(r => r.status === 'pending').length;
+        const completedTasks = state.tasks.filter(t => t.status === 'completed').length;
+        const totalRevenue = state.tasks.reduce((acc, task) => acc + (task.commission || 0), 0);
+
+        mainContent.innerHTML = `
+            <h1 class="text-4xl font-bold mb-4">Analytics Dashboard</h1>
+            <div class="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-4 gap-6 mb-8">
+                ${createStatCard('Total Users', state.users.length, 'M12 4.354a4 4 0 110 5.292M15 21H3v-1a6 6 0 0112 0v1zm0 0h6v-1a6 6 0 00-9-5.197M15 21a6 6 0 00-9-5.197m0 0A10.004 10.004 0 003 15', 'teal')}
+                ${createStatCard('Total Tasks', state.tasks.length, 'M9 5H7a2 2 0 00-2 2v12a2 2 0 002 2h10a2 2 0 002-2V7a2 2 0 00-2-2h-2M9 5a2 2 0 002 2h2a2 2 0 002-2M9 5a2 2 0 012-2h2a2 2 0 012 2', 'sky')}
+                ${createStatCard('Pending Verifications', pendingVerifications, 'M9 12l2 2 4-4m5.618-4.016A11.955 11.955 0 0112 2.944a11.955 11.955 0 01-8.618 3.04A12.02 12.02 0 003 9c0 5.591 3.824 10.29 9 11.622 5.176-1.332 9-6.03 9-11.622 0-1.042-.133-2.052-.382-3.016z', 'amber')}
+                ${createStatCard('Pending Reports', pendingReports, 'M3 21v-4m0 0V5a2 2 0 012-2h6.5l1 1H21l-3 6 3 6H8.5l-1-1H5a2 2 0 00-2 2zm9-13.5V9', 'red')}
+                ${createStatCard('Completed Tasks', completedTasks, 'M5 13l4 4L19 7', 'green')}
+                ${createStatCard('Total Revenue (LKR)', totalRevenue.toFixed(2), 'M17 9V7a2 2 0 00-2-2H5a2 2 0 00-2 2v6a2 2 0 002 2h2m2 4h10a2 2 0 002-2v-6a2 2 0 00-2-2H9a2 2 0 00-2 2v6a2 2 0 002 2zm7-5a2 2 0 11-4 0 2 2 0 014 0z', 'indigo')}
+            </div>
+            <div class="grid grid-cols-1 lg:grid-cols-2 gap-8">
+                <div class="bg-white p-6 rounded-lg shadow">
+                    <h3 class="text-xl font-semibold mb-4">User Growth (Last 30 Days)</h3>
+                    <div class="relative" style="height: 350px;"><canvas id="userGrowthChart"></canvas></div>
+                </div>
+                <div class="bg-white p-6 rounded-lg shadow">
+                    <h3 class="text-xl font-semibold mb-4">Task Growth (Last 30 Days)</h3>
+                    <div class="relative" style="height: 350px;"><canvas id="taskGrowthChart"></canvas></div>
+                </div>
+            </div>`;
+        setTimeout(() => {
+            renderUserGrowthChart();
+            renderTaskGrowthChart();
+        }, 0);
+    }
+
+    function renderUserGrowthChart() {
+        const ctx = document.getElementById('userGrowthChart')?.getContext('2d');
+        if (!ctx) return;
+
+        const thirtyDaysAgo = new Date();
+        thirtyDaysAgo.setDate(thirtyDaysAgo.getDate() - 30);
+
+        const recentUsers = state.users.filter(user => user.createdAt && user.createdAt.toDate() > thirtyDaysAgo);
+
+        const userCountsByDay = {};
+        for (let i = 0; i < 30; i++) {
+            const date = new Date();
+            date.setDate(date.getDate() - i);
+            const formattedDate = date.toISOString().split('T')[0]; // YYYY-MM-DD
+            userCountsByDay[formattedDate] = 0;
+        }
+
+        recentUsers.forEach(user => {
+            const joinDate = user.createdAt.toDate().toISOString().split('T')[0];
+            if (userCountsByDay[joinDate] !== undefined) {
+                userCountsByDay[joinDate]++;
+            }
+        });
+
+        const labels = Object.keys(userCountsByDay).sort();
+        const data = labels.map(label => userCountsByDay[label]);
+
+        if (charts.userGrowth) charts.userGrowth.destroy();
+        charts.userGrowth = new Chart(ctx, {
+            type: 'line',
+            data: {
+                labels: labels,
+                datasets: [{
+                    label: 'New Users',
+                    data: data,
+                    borderColor: '#0d9488', // teal-700
+                    backgroundColor: 'rgba(20, 184, 166, 0.1)', // teal-500 with opacity
+                    fill: true,
+                    tension: 0.4
+                }]
+            },
+            options: {
+                responsive: true,
+                maintainAspectRatio: false,
+                scales: {
+                    y: {
+                        beginAtZero: true,
+                        ticks: {
+                            stepSize: 1
+                        }
+                    }
+                }
+            }
+        });
+    }
+
+    function renderTaskGrowthChart() {
+        const ctx = document.getElementById('taskGrowthChart')?.getContext('2d');
+        if (!ctx) return;
+
+        const thirtyDaysAgo = new Date();
+        thirtyDaysAgo.setDate(thirtyDaysAgo.getDate() - 30);
+
+        const recentTasks = state.tasks.filter(task => task.timestamp && task.timestamp.toDate() > thirtyDaysAgo);
+        const taskCountsByDay = {};
+        for (let i = 0; i < 30; i++) {
+            const date = new Date();
+            date.setDate(date.getDate() - i);
+            taskCountsByDay[date.toISOString().split('T')[0]] = 0;
+        }
+        recentTasks.forEach(task => {
+            const createdDate = task.timestamp.toDate().toISOString().split('T')[0];
+            if (taskCountsByDay[createdDate] !== undefined) {
+                taskCountsByDay[createdDate]++;
+            }
+        });
+        const labels = Object.keys(taskCountsByDay).sort();
+        const data = labels.map(label => taskCountsByDay[label]);
+        if (charts.taskGrowth) charts.taskGrowth.destroy();
+        charts.taskGrowth = new Chart(ctx, {
+            type: 'bar',
+            data: {
+                labels: labels,
+                datasets: [{
+                    label: 'New Tasks',
+                    data: data,
+                    borderColor: '#38bdf8', // sky-500
+                    backgroundColor: 'rgba(56, 189, 248, 0.2)',
+                }]
+            },
+            options: { responsive: true, maintainAspectRatio: false, scales: { y: { beginAtZero: true, ticks: { stepSize: 1 } } } }
+        });
+    }
+
+    function renderLiveMap() {
+        mainContent.innerHTML = `
+            <h1 class="text-4xl font-bold mb-4">Helpers Live Map</h1>
+            <div class="bg-white p-6 rounded-lg shadow">
+                <div id="map" class="rounded-lg"></div>
+            </div>
+        `;
+
+        setTimeout(() => {
+            if (mapStuff.map) return;
+            mapStuff.map = L.map('map').setView([7.8731, 80.7718], 8);
+
+            L.tileLayer('https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png', {
+                maxZoom: 19,
+                attribution: '© OpenStreetMap'
+            }).addTo(mapStuff.map);
+
+            updateMapMarkers();
+        }, 0);
+    }
+
+    function updateMapMarkers() {
+        if (!mapStuff.map) return;
+
+        const currentMarkerIdsOnMap = { ...mapStuff.markers };
+
+        state.users.forEach(user => {
+            if (user.isHelper && user.location && user.location.latitude && user.location.longitude) {
+                const latLng = [user.location.latitude, user.location.longitude];
+
+                if (mapStuff.markers[user.id]) {
+                    mapStuff.markers[user.id].setLatLng(latLng);
+                    delete currentMarkerIdsOnMap[user.id];
+                } else {
+                    const marker = L.marker(latLng).addTo(mapStuff.map);
+                    marker.bindPopup(`<b>${user.displayName || 'Unnamed Helper'}</b><br><button class="mt-2 text-teal-600" data-action="viewUser" data-id="${user.id}">View Profile</button>`);
+                    mapStuff.markers[user.id] = marker;
+                }
+            }
+        });
+
+        Object.keys(currentMarkerIdsOnMap).forEach(userId => {
+            mapStuff.markers[userId].remove();
+            delete mapStuff.markers[userId];
+        });
+    }
+
+    function renderUsers() {
+        mainContent.innerHTML = `
+            <div class="flex justify-between items-center mb-4"><h1 class="text-4xl font-bold">User Management</h1></div>
+            <div class="bg-white shadow rounded-lg overflow-x-auto">
+                <table class="min-w-full leading-normal">
+                    <thead class="border-b-2 border-gray-200 bg-gray-100 text-left text-sm font-semibold text-gray-600 uppercase tracking-wider">
+                        <tr>
+                            <th class="px-5 py-3">User</th><th class="px-5 py-3">Phone</th><th class="px-5 py-3">Trust Score</th><th class="px-5 py-3">Status</th><th class="px-5 py-3">Role</th><th class="px-5 py-3">Actions</th>
+                        </tr>
+                    </thead>
+                    <tbody id="user-table-body"></tbody>
+                </table>
+            </div>`;
+        const tbody = document.getElementById('user-table-body');
+        if (state.users.length === 0) return renderEmptyState(tbody, 6, "No users found.");
+        const placeholderAvatar = 'https://placehold.co/40x40/e2e8f0/4a5568?text=U';
+        tbody.innerHTML = state.users.map(user => `
+            <tr class="border-b border-gray-200 hover:bg-gray-50">
+                <td class="px-5 py-4 flex items-center">
+                  <img src="${user.photoURL || placeholderAvatar}" onerror="this.onerror=null;this.src='${placeholderAvatar}';" alt="avatar" class="w-10 h-10 rounded-full mr-3 object-cover">
+                  <div>
+                    <p class="text-gray-900 whitespace-no-wrap">${user.displayName || 'N/A'}</p>
+                    <p class="text-gray-600 text-sm">${formatDate(user.createdAt)}</p>
+                  </div>
+                </td>
+                <td class="px-5 py-4">${user.phoneNumber || 'N/A'}</td>
+                <td class="px-5 py-4 text-center font-bold text-lg">${user.trustScore || 10}</td>
+                <td class="px-5 py-4">${createStatusBadge(user.status || 'active')}</td>
+                <td class="px-5 py-4">${createStatusBadge(user.isAdmin ? 'Admin' : (user.isHelper ? 'Helper' : 'User'))}</td>
+                <td class="px-5 py-4"><button class="text-teal-600 hover:text-teal-800 font-semibold" data-action="viewUser" data-id="${user.id}">Details</button></td>
+            </tr>`).join('');
+    }
+
+    function renderTasks() {
+        mainContent.innerHTML = `
+            <h1 class="text-4xl font-bold mb-8">Task Management</h1>
+            <div class="bg-white shadow rounded-lg overflow-hidden">
+                <table class="min-w-full leading-normal"><thead class="border-b-2 border-gray-200 bg-gray-100 text-left text-sm font-semibold text-gray-600 uppercase tracking-wider"><tr><th class="px-5 py-3">Task Title</th><th class="px-5 py-3">Posted By</th><th class="px-5 py-3">Budget (LKR)</th><th class="px-5 py-3">Status</th><th class="px-5 py-3">Actions</th></tr></thead><tbody id="task-table-body"></tbody></table>
+            </div>`;
+        const tbody = document.getElementById('task-table-body');
+        if (state.tasks.length === 0) return renderEmptyState(tbody, 5, "No tasks found.");
+        tbody.innerHTML = state.tasks.map(task => `
+            <tr class="border-b border-gray-200 hover:bg-gray-50">
+                <td class="px-5 py-4">${task.title}</td>
+                <td class="px-5 py-4">${task.posterName}</td>
+                <td class="px-5 py-4 text-right">${(task.budget || 0).toFixed(2)}</td>
+                <td class="px-5 py-4">${createStatusBadge(task.status)}</td>
+                <td class="px-5 py-4"><button class="text-red-600 hover:text-red-800 font-semibold" data-action="deleteTask" data-id="${task.id}">Delete</button></td>
+            </tr>`).join('');
+    }
+
+    function renderVerifications() {
+      const proofs = state.proofs || [];
+      const basic = state.basicDocs || [];
+      const cats  = state.categories || [];
+
+      const catLabel = (id) => {
+        const hit = cats.find(c => c.id === id);
+        return (hit?.label || id || '').toString();
+      };
+      const catMode = (id) => {
+        if (id === 'basic') return 'basic';
+        const hit = cats.find(c => c.id === id);
+        return (hit?.mode || 'physical').toString().toLowerCase();
+      };
+
+      mainContent.innerHTML = `
+        <h1 class="text-4xl font-bold mb-6">Verification</h1>
+
+        <!-- BASIC DOCS -->
+        <div class="bg-white rounded shadow p-4 mb-8">
+          <div class="flex items-center gap-2 mb-4">
+            <h2 class="text-xl font-semibold">Basic Documents (Physical one-time)</h2>
+            <span class="ml-auto text-xs text-gray-500">basic_docs/{uid}</span>
+          </div>
+          <div class="overflow-auto">
+            <table class="min-w-full text-sm">
+              <thead class="bg-gray-50">
+                <tr>
+                  <th class="p-3 text-left">User</th>
+                  <th class="p-3 text-left">Status</th>
+                  <th class="p-3 text-left">Docs</th>
+                  <th class="p-3 text-left">Notes</th>
+                  <th class="p-3 text-right">Action</th>
+                </tr>
+              </thead>
+              <tbody id="basicRows"></tbody>
+            </table>
+          </div>
+        </div>
+
+        <!-- CATEGORY PROOFS -->
+        <div class="flex items-center gap-3 mb-3">
+          <select id="vStatus" class="border rounded px-3 py-2">
+            <option value="all" selected>All</option>
+            <option value="pending">Pending</option>
+            <option value="needs_more_info">Needs more info</option>
+            <option value="approved">Approved</option>
+            <option value="rejected">Rejected</option>
+          </select>
+          <select id="vMode" class="border rounded px-3 py-2">
+            <option value="all" selected>All</option>
+            <option value="physical">Physical</option>
+            <option value="online">Online</option>
+          </select>
+          <input id="vSearch" class="border rounded px-3 py-2 flex-1"
+                 placeholder="Search uid / category / notes">
+          <button id="recomputeUser"
+                  class="px-3 py-2 rounded bg-teal-600 text-white hover:bg-teal-700">
+            Recompute Allowed (user)
+          </button>
+        </div>
+        <div class="bg-white rounded shadow overflow-auto">
+          <table class="min-w-full text-sm">
+            <thead class="bg-gray-50">
+              <tr>
+                <th class="p-3 text-left">User</th>
+                 <th class="p-3 text-left">Category</th>
+                 <th class="p-3 text-left">Mode</th>
+                 <th class="p-3 text-left">Status</th>
+                 <th class="p-3 text-left">Docs</th>
+                 <th class="p-3 text-left">Notes</th>
+                 <th class="p-3 text-right">Action</th>
+              </tr>
+            </thead>
+            <tbody id="vRows"></tbody>
+          </table>
+        </div>
+      `;
+
+      // Helpers
+      function badge(s) {
+        const map = {
+          pending: 'bg-amber-100 text-amber-800',
+          approved: 'bg-green-100 text-green-800',
+          rejected: 'bg-red-100 text-red-800',
+          needs_more_info: 'bg-blue-100 text-blue-800',
+          submitted: 'bg-amber-100 text-amber-800',
+        };
+        const cls = map[String(s||'').toLowerCase()] || 'bg-gray-100 text-gray-800';
+        return `<span class="px-2 py-1 rounded text-xs ${cls}">${String(s||'—').replace(/_/g,' ')}</span>`;
+      }
+      function isImg(u){ return /\.(png|jpe?g|webp|gif|bmp|svg)(\?.*)?$/i.test(u||''); }
+      function isPdf(u){ return /\.pdf(\?.*)?$/i.test(u||''); }
+      function thumb(u){
+        if (isImg(u)) return `<button class="h-12 w-12 rounded border overflow-hidden" data-action="openDocPreview" data-url="${u}">
+          <img class="h-full w-full object-cover" src="${u}"></button>`;
+        if (isPdf(u)) return `<button class="h-12 w-12 rounded border flex items-center justify-center text-[10px] font-semibold"
+          data-action="openDocPreview" data-url="${u}">PDF</button>`;
+        return '';
+      }
+
+      // ----- BASIC DOCS TABLE -----
+      const basicBody = document.getElementById('basicRows');
+      basicBody.innerHTML = (basic || []).map(b => {
+        const uid = b.id;
+        const docs = [
+          (b.idCard && (b.idCard.url || b.idCard.path)) || '',
+          (b.selfie && (b.selfie.url || b.selfie.path)) || '',
+          (b.policeClearance && (b.policeClearance.url || b.policeClearance.path)) || '',
+        ].filter(Boolean).slice(0,4);
+        const thumbs = docs.map(thumb).join('');
+
+        return `
+          <tr class="border-b hover:bg-gray-50">
+            <td class="p-3 align-top">${uid}</td>
+            <td class="p-3 align-top">${badge(b.status || 'pending')}</td>
+            <td class="p-3 align-top"><div class="flex items-center gap-2">${thumbs || '<span class="text-xs text-gray-400">No files</span>'}</div></td>
+            <td class="p-3 align-top"><div class="max-w-xs break-words text-gray-700">${b.notes || ''}</div></td>
+            <td class="p-3 align-top">
+              <div class="flex items-center justify-end gap-2">
+                <button class="px-2 py-1 rounded bg-green-500 text-white hover:bg-green-600"
+                        data-action="approveBasic" data-uid="${uid}">Approve</button>
+                <button class="px-2 py-1 rounded bg-blue-600 text-white hover:bg-blue-700"
+                        data-action="needsInfoBasic" data-uid="${uid}">Need info</button>
+                <button class="px-2 py-1 rounded bg-red-500 text-white hover:bg-red-600"
+                        data-action="rejectBasic" data-uid="${uid}">Reject</button>
+              </div>
+            </td>
+          </tr>`;
+      }).join('');
+
+      // ----- CATEGORY PROOFS TABLE -----
+      const sel   = document.getElementById('vStatus');
+      const mode  = document.getElementById('vMode');
+      const q     = document.getElementById('vSearch');
+      const tbody = document.getElementById('vRows');
+
+      function normalizeDocs(it) {
+        // Prefer the new shape
+        if (Array.isArray(it?.files)) {
+          // Return a list of URLs when available, or fall back to storage paths
+          return it.files
+            .map(f => (typeof f === 'string' ? f : (f.url || f.path || '')))
+            .filter(Boolean);
+        }
+        // Back-compat
+        if (Array.isArray(it?.docs)) return it.docs;
+        if (Array.isArray(it?.documents)) return it.documents;
+        if (it?.documents && typeof it.documents === 'object') return Object.values(it.documents);
+        return [];
+      }
+
+      function paint() {
+        const want = sel.value;
+        const wantMode = mode.value;
+        const text = (q.value||'').toLowerCase();
+        const rows = (proofs||[])
+          .filter(it => want==='all' ? true : (String(it.status||'pending')===want))
+          .filter(it => wantMode==='all' ? true : (catMode(it.categoryId||'')===wantMode))
+          .filter(it => `${(it.userId||it.uid||'')} ${(it.categoryId||'')} ${(it.notes||'')}`.toLowerCase().includes(text))
+          .sort((a,b) => String(a.status).localeCompare(String(b.status)));
+
+        tbody.innerHTML = rows.map(it => {
+          const docs = normalizeDocs(it);
+          const thumbs = (docs || []).slice(0,4).map(thumb).join('');
+          const uid = it.userId || it.uid || '—';
+          const cat = catLabel(it.categoryId || '');
+          const mode_val = catMode(it.categoryId || '');
+
+          return `
+          <tr class="border-b hover:bg-gray-50">
+            <td class="p-3 align-top">${uid}</td>
+            <td class="p-3 align-top">${cat}</td>
+            <td class="p-3 align-top capitalize">${mode_val}</td>
+            <td class="p-3 align-top">${badge(it.status || 'pending')}</td>
+            <td class="p-3 align-top"><div class="flex items-center gap-2">${thumbs || '<span class="text-xs text-gray-400">No files</span>'}</div></td>
+            <td class="p-3 align-top"><div class="max-w-xs break-words text-gray-700">${it.notes || ''}</div></td>
+            <td class="p-3 align-top">
+              <div class="flex items-center justify-end gap-2">
+                <button class="px-2 py-1 rounded bg-green-500 text-white hover:bg-green-600"
+                        data-action="approveProof" data-id="${it.id}">Approve</button>
+                <button class="px-2 py-1 rounded bg-blue-600 text-white hover:bg-blue-700"
+                        data-action="needsInfoProof" data-id="${it.id}">Need info</button>
+                <button class="px-2 py-1 rounded bg-red-500 text-white hover:bg-red-600"
+                        data-action="rejectProof" data-id="${it.id}">Reject</button>
+              </div>
+            </td>
+          </tr>`;
+        }).join('');
+      }
+
+      sel.addEventListener('change', paint);
+      mode.addEventListener('change', paint);
+      q.addEventListener('input', paint);
+      paint();
+
+      // Recompute button (kept)
+      document.getElementById('recomputeUser').onclick = async () => {
+        const uid = prompt('User ID to recompute allowed categories:','');
+        if (!uid) return;
+        try {
+          await functions.httpsCallable('recomputeAllowedForUser')({ uid });
+          showToast('Recompute requested.');
+        } catch (e) { showToast(e.message||'Failed', true); }
+      };
+    }
+
+    function renderEligibility() {
+      const items = state.eligibility || [];
+      // scaffold
+      mainContent.innerHTML = `
+        <h1 class="text-4xl font-bold mb-6">Category Eligibility</h1>
+        <div class="flex flex-wrap gap-3 mb-4">
+          <select id="eligStatus" class="border rounded px-3 py-2">
+            <option value="all" selected>All</option>
+            <option value="submitted">Submitted</option>
+            <option value="needs_more_info">Needs more info</option>
+            <option value="approved">Approved</option>
+            <option value="rejected">Rejected</option>
+          </select>
+          <input id="eligSearch" class="border rounded px-3 py-2 flex-1" placeholder="Search userId / categoryId / notes">
+        </div>
+        <div class="bg-white rounded shadow overflow-auto">
+          <table class="min-w-full text-sm">
+            <thead class="bg-gray-50">
+              <tr>
+                <th class="p-3 text-left">User</th>
+                <th class="p-3 text-left">Category</th>
+                <th class="p-3 text-left">Status</th>
+                <th class="p-3 text-left">Docs</th>
+                <th class="p-3 text-left">Notes</th>
+                <th class="p-3 text-right">Action</th>
+              </tr>
+            </thead>
+            <tbody id="eligRows"></tbody>
+          </table>
+        </div>
+      `;
+      const sel = document.getElementById('eligStatus');
+      const q   = document.getElementById('eligSearch');
+      const tbody = document.getElementById('eligRows');
+
+      function pill(s) {
+        const map = {
+          submitted: 'bg-amber-100 text-amber-800',
+          needs_more_info: 'bg-orange-100 text-orange-800',
+          approved: 'bg-green-100 text-green-700',
+          rejected: 'bg-red-100 text-red-700'
+        };
+        const cls = map[s] || 'bg-gray-100 text-gray-700';
+        return `<span class="px-2 py-1 rounded text-xs ${cls}">${String(s||'—').replace(/_/g,' ')}</span>`;
+      }
+
+      function isImage(url) { return /\.(png|jpe?g|webp|gif|bmp|svg)(\?.*)?$/i.test(url || ''); }
+      function isPdf(url)   { return /\.pdf(\?.*)?$/i.test(url || ''); }
+
+      function normalizeDocs(it) {
+        // Prefer the new shape
+        if (Array.isArray(it?.files)) {
+          // Return a list of URLs when available, or fall back to storage paths
+          return it.files
+            .map(f => (typeof f === 'string' ? f : (f.url || f.path || '')))
+            .filter(Boolean);
+        }
+        // Back-compat
+        if (Array.isArray(it?.docs)) return it.docs;
+        if (Array.isArray(it?.documents)) return it.documents;
+        if (it?.documents && typeof it.documents === 'object') return Object.values(it.documents);
+        return [];
+      }
+
+      function paint() {
+        const want = sel.value;
+        const text = (q.value||'').toLowerCase();
+        const rows = (items||[])
+          .filter(it => want==='all' ? true : (String(it.status||'submitted')===want))
+          .filter(it => `${it.userId} ${it.categoryId} ${it.notes||''}`.toLowerCase().includes(text))
+          .sort((a,b) => String(a.status).localeCompare(String(b.status)));
+
+        tbody.innerHTML = rows.map(it => {
+          const docs = normalizeDocs(it);
+          const thumbs = (docs || []).slice(0, 4).map(u => {
+            const safe = String(u || '');
+            if (isImage(safe)) {
+              return `
+                <button class="h-12 w-12 rounded border overflow-hidden"
+                        data-action="openDocPreview" data-url="${safe}"
+                        title="Preview image">
+                  <img src="${safe}" loading="lazy" class="h-full w-full object-cover" alt="proof image"/>
+                </button>`;
+            }
+            if (isPdf(safe)) {
+              return `
+                <button class="h-12 w-12 rounded border bg-gray-100 flex items-center justify-center text-[10px] font-semibold"
+                        data-action="openDocPreview" data-url="${safe}"
+                        title="Preview PDF">
+                  PDF
+                </button>`;
+            }
+            return `<a class="h-12 px-2 inline-flex items-center rounded border text-xs underline"
+                      href="${safe}" target="_blank" rel="noopener">link</a>`;
+          }).join('');
+          const more = (docs?.length || 0) > 4
+            ? `<span class="ml-2 text-xs text-gray-600">+${docs.length - 4} more</span>`
+            : '';
+          const docsHtml = docs?.length
+            ? `<div class="flex items-center gap-2 flex-wrap">${thumbs}${more}</div>`
+            : '—';
+
+          return `
+            <tr class="border-t">
+              <td class="p-3 font-mono">${it.userId}</td>
+              <td class="p-3">${it.categoryId}</td>
+              <td class="p-3">${pill(it.status||'submitted')}</td>
+              <td class="p-3">${docsHtml}</td>
+              <td class="p-3">${it.notes||''}</td>
+              <td class="p-3 text-right space-x-2">
+                <button class="px-3 py-1.5 rounded bg-green-600 text-white hover:bg-green-700"
+                        data-action="approveEligibility" data-user="${it.userId}" data-cat="${it.categoryId}">Approve</button>
+                <button class="px-3 py-1.5 rounded bg-amber-500 text-white hover:bg-amber-600"
+                        data-action="requestEligibilityReupload" data-user="${it.userId}" data-cat="${it.categoryId}">Need more info</button>
+                <button class="px-3 py-1.5 rounded bg-red-600 text-white hover:bg-red-700"
+                        data-action="rejectEligibility" data-user="${it.userId}" data-cat="${it.categoryId}">Reject</button>
+              </td>
+            </tr>`;
+        }).join('') || `<tr><td class="p-6 text-center text-gray-500" colspan="6">No items</td></tr>`;
+      }
+
+      sel.addEventListener('change', paint);
+      q.addEventListener('input', paint);
+      paint();
+    }
+
+
+    function renderInterviews() {
+         mainContent.innerHTML = `
+            <h1 class="text-4xl font-bold mb-8">Interview Requests</h1>
+            <div class="bg-white shadow rounded-lg overflow-hidden">
+                <table class="min-w-full leading-normal"><thead class="border-b-2 border-gray-200 bg-gray-100 text-left text-sm font-semibold text-gray-600 uppercase tracking-wider"><tr><th class="px-5 py-3">User Name</th><th class="px-5 py-3">User ID</th><th class="px-5 py-3">Requested At</th><th class="px-5 py-3">Actions</th></tr></thead><tbody id="interview-table-body"></tbody></table>
+            </div>`;
+        const tbody = document.getElementById('interview-table-body');
+        if (state.interviews.length === 0) return renderEmptyState(tbody, 4, "No pending interview requests.");
+        tbody.innerHTML = state.interviews.map(interview => `
+            <tr class="border-b border-gray-200 hover:bg-gray-50">
+                <td class="px-5 py-4">${interview.userName || 'N/A'}</td>
+                <td class="px-5 py-4 text-xs font-mono">${interview.userId}</td>
+                <td class="px-5 py-4">${formatDate(interview.requestTimestamp)}</td>
+                <td class="px-5 py-4"><button class="text-teal-600 hover:text-teal-800 font-semibold" data-action="viewInterview" data-id="${interview.userId}">Review</button></td>
+            </tr>`).join('');
+    }
+
+    function renderReports() {
+        mainContent.innerHTML = `
+            <h1 class="text-4xl font-bold mb-8">Content Reports</h1>
+            <div class="bg-white shadow rounded-lg overflow-hidden">
+                <table class="min-w-full leading-normal"><thead class="border-b-2 border-gray-200 bg-gray-100 text-left text-sm font-semibold text-gray-600 uppercase tracking-wider"><tr><th class="px-5 py-3">Reported Item</th><th class="px-5 py-3">Type</th><th class="px-5 py-3">Reason</th><th class="px-5 py-3">Reported By</th><th class="px-5 py-3">Status</th><th class="px-5 py-3">Actions</th></tr></thead><tbody id="report-table-body"></tbody></table>
+            </div>`;
+        const tbody = document.getElementById('report-table-body');
+        if (state.reports.length === 0) return renderEmptyState(tbody, 6, "No reports found.");
+        tbody.innerHTML = state.reports.map(r => `
+            <tr class="border-b border-gray-200 hover:bg-gray-50">
+                <td class="px-5 py-4">${r.contentSnippet || r.reportedContentId}</td>
+                <td class="px-5 py-4">${r.contentType}</td>
+                <td class="px-5 py-4">${r.reason}</td>
+                <td class="px-5 py-4">${r.reporterName}</td>
+                <td class="px-5 py-4">${createStatusBadge(r.status)}</td>
+                <td class="px-5 py-4"><button data-action="viewReport" data-id="${r.id}" class="px-3 py-1 rounded bg-amber-50 text-amber-700 hover:bg-amber-100 border border-amber-200">Review</button></td>
+            </tr>`).join('');
+    }
+
+    function renderCommunityWatch() {
+        mainContent.innerHTML = `
+            <h1 class="text-4xl font-bold mb-4">Community Watch</h1>
+            <p class="text-gray-600 mb-6">Use AI to scan text for inappropriate content. This requires a configured Gemini API Key.</p>
+            <div class="bg-white p-6 rounded-lg shadow">
+                <textarea id="community-watch-input" class="w-full h-40 p-3 border rounded-lg focus:ring-2 focus:ring-teal-500" placeholder="Paste text here to scan..."></textarea>
+                <div class="text-right mt-4">
+                    <button data-action="scanContent" class="px-6 py-2 bg-teal-600 text-white font-semibold rounded-lg hover:bg-teal-700">Scan Content</button>
+                </div>
+                <div id="scan-result-container" class="mt-6 hidden-content">
+                    <h3 class="text-xl font-bold mb-2">Scan Result:</h3>
+                    <div id="scan-result-loader" class="loader hidden-content"></div>
+                    <div id="scan-result-output" class="p-4 border rounded-lg bg-gray-50"></div>
+                </div>
+            </div>`;
+    }
+
+    function renderSettings() {
+        mainContent.innerHTML = `
+            <h1 class="text-4xl font-bold mb-4">Platform Settings</h1>
+            <p class="text-gray-600 mb-6">Configure global settings for the Helpify platform.</p>
+            <div class="bg-white p-6 rounded-lg shadow max-w-2xl">
+                <div class="space-y-6">
+                    <div>
+                        <label for="commission-rate" class="block text-sm font-medium text-gray-700">Commission Rate (%)</label>
+                        <input type="number" id="commission-rate" value="${state.settings.commissionRate || 0}" class="mt-1 block w-full px-3 py-2 border border-gray-300 rounded-md shadow-sm">
+                    </div>
+                    <div>
+                        <label for="free-task-limit" class="block text-sm font-medium text-gray-700">Free Task Posting Limit</label>
+                        <input type="number" id="free-task-limit" value="${state.settings.freeTaskLimit || 0}" class="mt-1 block w-full px-3 py-2 border border-gray-300 rounded-md shadow-sm">
+                    </div>
+                    <div>
+                        <label for="referral-bonus" class="block text-sm font-medium text-gray-700">Referral Bonus (LKR)</label>
+                        <input type="number" id="referral-bonus" value="${state.settings.referralBonus || 0}" class="mt-1 block w-full px-3 py-2 border border-gray-300 rounded-md shadow-sm">
+                    </div>
+                </div>
+                <div class="text-right mt-8">
+                    <button data-action="saveSettings" class="px-6 py-2 bg-teal-600 text-white font-semibold rounded-lg hover:bg-teal-700">Save Settings</button>
+                </div>
+            </div>`;
+    }
+
+
+    async function tryLoadStorageDocs(userId) {
+        try {
+            const storage = firebase.storage();
+            const base = `verification_documents/${userId}/`;
+            const names = ['selfie.jpg','nic_front.jpg','nic_back.jpg','police.jpg'];
+            const urls = [];
+            for (const name of names) {
+                try {
+                    const url = await storage.ref(base + name).getDownloadURL();
+                    urls.push({ key: name.replace('.jpg',''), url });
+                } catch (_) {}
+            }
+            return urls;
+        } catch (e) {
+            console.warn('Storage not available or failed', e);
+            return [];
+        }
+    }
+
+    // --- Action Handlers ---
+    async function handleUserAction(userId, userAction) {
+        const userRef = db.collection("users").doc(userId);
+        try {
+            switch(userAction) {
+                case 'suspend':
+                    await userRef.update({ status: 'suspended' });
+                    showToast('User has been suspended.');
+                    break;
+                case 'unsuspend':
+                    await userRef.update({ status: 'active' });
+                    showToast('User has been re-activated.');
+                    break;
+                case 'makeAdmin':
+                    await userRef.update({ isAdmin: true });
+                    showToast('User is now an admin.');
+                    break;
+                case 'removeAdmin':
+                    await userRef.update({ isAdmin: false });
+                    showToast('User is no longer an admin.');
+                    break;
+            }
+            hideModal();
+        } catch (error) {
+            console.error(`Error performing action ${userAction}:`, error);
+            showToast(`Failed to ${userAction} user.`, true);
+        }
+    }
+
+    async function handleVerificationAction(userId, newStatus) {
+        const verification = state.verifications.find(v => v.userId === userId);
+        if (!verification) {
+            showToast('Could not find verification details for this user.', true);
+            return;
+        }
+
+        try {
+            // Find the legacy request document *before* the transaction
+            const legacyRequestQuery = db.collection('verification_requests').where('userId', '==', userId).orderBy('submittedAt', 'desc').limit(1);
+            const legacySnapshot = await legacyRequestQuery.get();
+            const legacyRequestRef = !legacySnapshot.empty ? legacySnapshot.docs[0].ref : null;
+
+            await db.runTransaction(async (transaction) => {
+                const userRef = db.collection("users").doc(userId);
+                const verificationV2Ref = db.collection("verifications").doc(userId);
+
+                // Update the main user and new verification docs
+                transaction.set(verificationV2Ref, { status: newStatus, reviewedAt: firebase.firestore.FieldValue.serverTimestamp(), updatedAt: firebase.firestore.FieldValue.serverTimestamp() }, { merge: true });
+
+                if (newStatus === 'approved') {
+                    let scoreIncrement = 10;
+                    let verificationLevel = 'bronze';
+                    if (verification.nicFrontUrl || (verification.documents && verification.documents.nicFrontUrl)) {
+                        scoreIncrement = 25;
+                        verificationLevel = 'silver';
+                    }
+                    if (verification.policeUrl || (verification.documents && verification.documents.policeClearanceUrl)) {
+                        scoreIncrement = 40;
+                        verificationLevel = 'gold';
+                    }
+                    transaction.update(userRef, {
+                        isHelper: true,
+                        verificationStatus: 'verified',
+                        trustScore: firebase.firestore.FieldValue.increment(scoreIncrement),
+                        verificationLevel: verificationLevel
+                    });
+                } else if (newStatus === 'rejected') {
+                    transaction.update(userRef, { verificationStatus: 'rejected' });
+                }
+
+                // If a legacy request was found, update it within the same transaction
+                if (legacyRequestRef) {
+                    transaction.update(legacyRequestRef, { status: newStatus, reviewedAt: firebase.firestore.FieldValue.serverTimestamp() });
+                }
+            });
+            hideModal();
+            showToast(`Request has been successfully ${newStatus}.`);
+        } catch (error) {
+            console.error("Error handling verification:", error);
+            showToast(`Failed to update status: ${error.message}`, true);
+        }
+    }
+    // --- Category Eligibility helpers ---
+    async function updateEligibility(userId, categoryId, patch) {
+      const ref = db.collection('users').doc(userId).collection('categoryEligibility').doc(categoryId);
+      await ref.set(
+        { ...patch, updatedAt: firebase.firestore.FieldValue.serverTimestamp() },
+        { merge: true }
+      );
+      if (patch.status === 'approved') {
+        await db.collection('users').doc(userId).set({
+          categoriesApproved: firebase.firestore.FieldValue.arrayUnion(categoryId)
+        }, { merge: true });
+      }
+    }
+
+    // Document preview helpers (image/PDF lightbox)
+    function openDocPreview(url) {
+      const box = document.getElementById('docPreview');
+      const slot = document.getElementById('docPreviewContent');
+      const isImg = /\.(png|jpe?g|webp|gif|bmp|svg)(\?.*)?$/i.test(url || '');
+      const isPdf = /\.pdf(\?.*)?$/i.test(url || '');
+
+      slot.innerHTML = isImg
+        ? `<img src="${url}" class="w-full h-full object-contain" alt="Document preview" loading="lazy"/>`
+        : isPdf
+          ? `<iframe src="https://docs.google.com/gview?embedded=1&url=${encodeURIComponent(url)}"
+                     class="w-full h-full" frameborder="0"></iframe>`
+          : `<div class="p-6">
+               Preview not supported.
+               <a href="${url}" target="_blank" rel="noopener" class="text-teal-700 underline">Open in new tab</a>
+             </div>`;
+
+      box.classList.remove('hidden');
+      box.classList.add('flex');
+
+      // Backdrop click closes (one-time)
+      box.addEventListener('click', (e) => {
+        if (e.target.id === 'docPreview') closeDocPreview();
+      }, { once: true });
+    }
+    function closeDocPreview() {
+      const box = document.getElementById('docPreview');
+      const slot = document.getElementById('docPreviewContent');
+      slot.innerHTML = '';
+      box.classList.add('hidden');
+      box.classList.remove('flex');
+    }
+
+
+    // Replace the old handleInterviewAction function with this one
+    async function handleInterviewAction(userId, action) {
+        const interviewRef = db.collection("interviewRequests").doc(userId);
+        const userRef = db.collection("users").doc(userId);
+        try {
+            const batch = db.batch();
+            if (action === 'complete') {
+                // Get the score from the input field in the modal
+                const score = Number(document.getElementById('interview-score')?.value || 0);
+
+                batch.update(interviewRef, { status: 'completed' });
+                batch.update(userRef, {
+                    interviewStatus: 'completed',
+                    interviewScore: score, // Save the score
+                    badges: firebase.firestore.FieldValue.arrayUnion('Pro Helper'), // Add the badge
+                    trustScore: firebase.firestore.FieldValue.increment(50),
+                });
+                showToast('Interview marked as complete. User awarded "Pro Helper" badge.');
+
+            } else if (action === 'dismiss') {
+                batch.update(interviewRef, { status: 'dismissed' });
+                batch.update(userRef, { interviewStatus: 'none' });
+                showToast('Interview request dismissed.');
+            }
+            await batch.commit();
+            hideModal();
+        } catch (error) {
+            console.error(`Error performing action ${action}:`, error);
+            showToast(`Failed to ${action} interview request.`, true);
+        }
+    }
+
+    async function handleReportAction(reportId, action) {
+        const reportRef = db.collection("reports").doc(reportId);
+        const report = state.reports.find(r => r.id === reportId);
+        if (!report) return;
+
+        try {
+            const batch = db.batch();
+            batch.update(reportRef, { status: 'resolved', resolvedAt: firebase.firestore.FieldValue.serverTimestamp() });
+
+            if (action === 'dismiss') {
+                showToast('Report dismissed.');
+            } else if (action === 'deleteContentAndSuspend') {
+                const contentRef = db.collection(report.contentType === 'task' ? 'tasks' : 'users').doc(report.reportedContentId);
+                batch.delete(contentRef);
+                const userRef = db.collection("users").doc(report.reportedUserId);
+                batch.update(userRef, { status: 'suspended' });
+                showToast('Content deleted and user suspended.');
+            }
+            await batch.commit();
+            hideModal();
+        } catch (error) {
+            console.error("Error resolving report:", error);
+            showToast('Failed to resolve report.', true);
+        }
+    }
+
+    // --- Utility Functions ---
+    const formatDate = (timestamp) => {
+        if (!timestamp || typeof timestamp.toDate !== 'function') return '...';
+        return timestamp.toDate().toLocaleDateString('en-LK', { year: 'numeric', month: 'short', day: 'numeric' });
+    };
+
+    const createStatusBadge = (status) => {
+        const statusText = String(status || 'N/A').replace(/_/g, ' ').replace(/\b\w/g, l => l.toUpperCase());
+        const statusClasses = {
+            'Admin': 'bg-purple-100 text-purple-700',
+            'Helper': 'bg-indigo-100 text-indigo-700',
+            'User': 'bg-gray-100 text-gray-700',
+            'Verified': 'bg-green-100 text-green-700',
+            'Approved': 'bg-green-100 text-green-700',
+            'Pending Review': 'bg-amber-100 text-amber-700',
+            'Pending': 'bg-amber-100 text-amber-700',
+            'Rejected': 'bg-red-100 text-red-700',
+            'Open': 'bg-sky-100 text-sky-700',
+            'Completed': 'bg-green-100 text-green-700',
+            'In Progress': 'bg-amber-100 text-amber-700',
+            'Active': 'bg-green-100 text-green-700',
+            'Suspended': 'bg-red-100 text-red-700',
+            'Bronze': 'bg-orange-200 text-orange-800',
+            'Silver': 'bg-gray-300 text-gray-800',
+            'Gold': 'bg-yellow-200 text-yellow-800',
+            'Unverified': 'bg-gray-100 text-gray-700',
+        };
+        const className = statusClasses[statusText] || 'bg-gray-100 text-gray-700';
+        return `<span class="px-2 py-1 text-xs font-semibold rounded-full ${className}">${statusText}</span>`;
+    };
+
+    const createStatCard = (title, value, svgPath, color) => {
+        const colors = {
+            teal: 'bg-teal-100 text-teal-600',
+            sky: 'bg-sky-100 text-sky-600',
+            amber: 'bg-amber-100 text-amber-600',
+            red: 'bg-red-100 text-red-600',
+            green: 'bg-green-100 text-green-600',
+            indigo: 'bg-indigo-100 text-indigo-600',
+        };
+        return `
+            <div class="bg-white p-6 rounded-lg shadow flex items-center">
+                <div class="p-3 rounded-full ${colors[color]} mr-4"><svg class="w-8 h-8" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="${svgPath}"></path></svg></div>
+                <div><h3 class="text-gray-500 text-lg">${title}</h3><p class="text-3xl font-bold">${value}</p></div>
+            </div>`;
+    };
+
+    const renderEmptyState = (tbody, colSpan, message) => {
+        if(tbody) tbody.innerHTML = `<tr><td colspan="${colSpan}" class="text-center p-8 text-gray-500">${message}</td></tr>`;
+    };
+
+    const showLoaderInContent = (message = 'Loading...') => {
+        mainContent.innerHTML = `<div class="flex flex-col justify-center items-center h-full"><div class="loader"></div><p class="mt-4 text-gray-600">${message}</p></div>`;
+    };
+
+    // --- Event Delegation for All Actions ---
+    document.body.addEventListener('click', async (event) => {
+        const targetElement = event.target.closest('[data-action]');
+        if (!targetElement) return;
+
+        const { action, id } = targetElement.dataset;
+        if (targetElement.disabled) return;
+
+        switch (action) {
+            case 'viewUser':
+                const user = state.users.find(u => u.id === id);
+                if (!user) return;
+                showModal(`User: ${user.displayName || 'N/A'}`,
+                    `<div class="space-y-2">
+                        <p><strong>Phone:</strong> ${user.phoneNumber || 'N/A'}</p>
+                        <p><strong>Trust Score:</strong> <span class="font-bold text-lg">${user.trustScore || '10'}</span></p>
+                        <p><strong>Status:</strong> ${createStatusBadge(user.status || 'active')}</p>
+                        <p><strong>Role:</strong> ${createStatusBadge(user.isAdmin ? 'Admin' : (user.isHelper ? 'Helper' : 'User'))}</p>
+                        <p><strong>Verification Level:</strong> ${createStatusBadge(user.verificationLevel || 'Unverified')}</p>
+                    </div>`,
+                    `<button data-action="sendNotification" data-id="${id}" class="px-4 py-2 bg-blue-500 text-white rounded-lg hover:bg-blue-600">Send Notification</button>
+                     <button data-action="${user.isAdmin ? 'removeAdmin' : 'makeAdmin'}" data-id="${id}" class="px-4 py-2 bg-purple-500 text-white rounded-lg hover:bg-purple-600">${user.isAdmin ? 'Remove Admin' : 'Make Admin'}</button>
+                     <button data-action="${user.status === 'suspended' ? 'unsuspend' : 'suspend'}" data-id="${id}" class="px-4 py-2 bg-red-500 text-white rounded-lg hover:bg-red-600">${user.status === 'suspended' ? 'Un-suspend' : 'Suspend'}</button>`
+                );
+                break;
+            case 'suspend':
+            case 'unsuspend':
+            case 'makeAdmin':
+            case 'removeAdmin':
+                handleUserAction(id, action);
+                break;
+
+            case 'sendNotification':
+                showModal(
+                    'Send Notification',
+                    `<div class="space-y-4">
+                        <div>
+                            <label for="notification-title" class="block text-sm font-medium text-gray-700">Title</label>
+                            <input type="text" id="notification-title" class="mt-1 block w-full px-3 py-2 border border-gray-300 rounded-md shadow-sm" placeholder="Notification Title">
+                        </div>
+                        <div>
+                            <label for="notification-body" class="block text-sm font-medium text-gray-700">Body</label>
+                            <textarea id="notification-body" rows="4" class="mt-1 block w-full px-3 py-2 border border-gray-300 rounded-md shadow-sm" placeholder="Notification message..."></textarea>
+                        </div>
+                    </div>`,
+                    `<button data-action="closeModal" class="px-4 py-2 bg-gray-500 text-white rounded-lg hover:bg-gray-600">Cancel</button>
+                     <button data-action="confirmSendNotification" data-id="${id}" class="px-4 py-2 bg-blue-500 text-white rounded-lg hover:bg-blue-600">Send</button>`
+                );
+                break;
+
+            case 'confirmSendNotification':
+                const title = document.getElementById('notification-title')?.value;
+                const body = document.getElementById('notification-body')?.value;
+                if (title && body) {
+                    try {
+                        targetElement.disabled = true;
+                        targetElement.textContent = 'Sending...';
+                        const notificationsRef = db.collection(`users/${id}/notifications`);
+                        await notificationsRef.add({ title, body, read: false, createdAt: firebase.firestore.FieldValue.serverTimestamp() });
+                        showToast('Notification sent successfully.');
+                        hideModal();
+                    } catch (error) {
+                        showToast('Failed to send notification.', true);
+                        console.error("Error sending notification:", error);
+                        hideModal();
+                    }
+                } else {
+                    showToast('Title and body cannot be empty.', true);
+                }
+                break;
+            case 'deleteTask':
+                showModal(
+                    'Confirm Deletion',
+                    `<p>Are you sure you want to delete this task? This action cannot be undone.</p>`,
+                    `<button data-action="closeModal" class="px-4 py-2 bg-gray-200 text-gray-800 rounded-lg hover:bg-gray-300">Cancel</button>
+                     <button data-action="confirmDeleteTask" data-id="${id}" class="px-4 py-2 bg-red-600 text-white rounded-lg hover:bg-red-700">Delete Task</button>`
+                );
+                break;
+            case 'confirmDeleteTask':
+                 try {
+                     targetElement.disabled = true;
+                     targetElement.textContent = 'Deleting...';
+                     await db.collection('tasks').doc(id).delete();
+                     showToast('Task deleted successfully.');
+                     hideModal();
+                 } catch (error) {
+                     showToast('Failed to delete task.', true);
+                     console.error("Error deleting task:", error);
+                     hideModal();
+                 }
+                break;
+            case 'viewVerification':
+                const verification = state.verifications.find(v => v.id === id);
+                if (!verification) return;
+
+                const docUrls = {
+                    selfieUrl: verification.selfieUrl,
+                    nicFrontUrl: verification.nicFrontUrl,
+                    nicBackUrl: verification.nicBackUrl,
+                    policeUrl: verification.policeUrl,
+                    ...verification.documents
+                };
+
+                let imagesHTML = Object.keys(docUrls).map(key => {
+                    const url = docUrls[key];
+                    if (!url) return '';
+                    const title = key.replace(/([A-Z])/g, ' $1').replace('Url', '').replace(/^./, str => str.toUpperCase());
+                    return `<div class="mb-4">
+                                <p class="font-semibold">${title}:</p>
+                                <a href="${url}" target="_blank" rel="noopener noreferrer">
+                                    <img src="${url}" alt="${title}" class="w-full h-auto rounded-lg border mt-1"/>
+                                </a>
+                            </div>`;
+                }).join('');
+
+                if (!imagesHTML) {
+                     imagesHTML = '<p class="text-gray-500">No documents found in this request.</p>';
+                }
+
+
+                showModal('Review Verification',
+                    `<p><strong>User:</strong> ${verification.userName} (${verification.userId})</p>
+                     <p><strong>Document Type:</strong> ${verification.documentType || 'N/A'}</p>
+                     <p><strong>Submitted:</strong> ${formatDate(verification.submittedAt)}</p>
+                     <div class="mt-4">${imagesHTML}</div>`,
+                    `<button data-action="rejectVerification" data-id="${id}" class="px-4 py-2 bg-red-500 text-white rounded-lg hover:bg-red-600">Reject</button>
+                     <button data-action="requestReupload" data-id="${verification.userId}" class="px-4 py-2 bg-amber-500 text-white rounded-lg hover:bg-amber-600 mr-2">Request reupload</button>
+                     <button data-action="approveVerification" data-id="${id}" class="px-4 py-2 bg-green-500 text-white rounded-lg hover:bg-green-600">Approve</button>`
+                );
+                break;
+            case 'requestReupload':
+                targetElement.disabled = true;
+                targetElement.textContent = 'Requesting...';
+                try {
+                    const selected = Array.from(document.querySelectorAll('.reupload-check:checked')).map(el => el.value);
+                    const requireAll = selected.length === 0;
+                    await markVerificationNeedsMoreInfo(id, selected, requireAll);
+                    showToast(requireAll ? 'Requested full resubmission.' : ('Requested reupload of: ' + selected.join(', ')));
+                    hideModal();
+                } catch (err) {
+                    console.error(err);
+                    showToast('Failed to request reupload.', true);
+                    targetElement.disabled = false;
+                    targetElement.textContent = 'Request reupload';
+                }
+                break;
+            case 'approveVerification':
+            case 'rejectVerification':
+                targetElement.disabled = true;
+                targetElement.textContent = 'Processing...';
+                const verificationForAction = state.verifications.find(v => v.id === id);
+                if (verificationForAction && verificationForAction.userId) {
+                    const newStatus = action === 'approveVerification' ? 'approved' : 'rejected';
+                    await handleVerificationAction(verificationForAction.userId, newStatus);
+                } else {
+                     showToast('Could not find user for this verification.', true);
+                     targetElement.disabled = false;
+                     targetElement.textContent = action === 'approveVerification' ? 'Approve' : 'Reject';
+                }
+                break;
+            // Replace the old 'viewInterview' case with this one
+            case 'viewInterview':
+                const interview = state.interviews.find(i => i.userId === id);
+                const userForInterview = state.users.find(u => u.id === id);
+                if (!interview || !userForInterview) return;
+                showModal(`Interview Request: ${userForInterview.displayName}`,
+                    `<div class="space-y-4">
+                        <div>
+                            <p><strong>User Name:</strong> ${userForInterview.displayName}</p>
+                            <p><strong>Phone:</strong> ${userForInterview.phoneNumber || 'N/A'}</p>
+                            <p><strong>Requested At:</strong> ${formatDate(interview.requestTimestamp)}</p>
+                            <a href="#" data-action="viewUser" data-id="${id}" class="text-teal-600 font-semibold hover:underline">View Full User Profile &rarr;</a>
+                        </div>
+                        <div>
+                            <label for="interview-score" class="block text-sm font-medium text-gray-700">Interview Score (out of 100)</label>
+                            <input type="number" id="interview-score" class="mt-1 block w-full px-3 py-2 border border-gray-300 rounded-md shadow-sm" placeholder="e.g., 85">
+                        </div>
+                    </div>`,
+                    `<button data-action="dismissInterview" data-id="${id}" class="px-4 py-2 bg-gray-500 text-white rounded-lg hover:bg-gray-600">Dismiss</button>
+                     <button data-action="completeInterview" data-id="${id}" class="px-4 py-2 bg-green-500 text-white rounded-lg hover:bg-green-600">Mark as Completed</button>`
+                );
+                break;
+            case 'completeInterview':
+                await handleInterviewAction(id, 'complete');
+                break;
+            case 'dismissInterview':
+                await handleInterviewAction(id, 'dismiss');
+                break;
+            case 'viewReport':
+                const report = state.reports.find(r => r.id === id);
+                if (!report) return;
+                showModal('Review Report',
+                    `<div>
+                        <p><strong>Reported Item:</strong> ${report.contentSnippet || report.reportedContentId}</p>
+                        <p><strong>Reason:</strong> ${report.reason}</p>
+                        <p><strong>Reported By:</strong> ${report.reporterName} (${report.reporterId})</p>
+                        <p><strong>Reported At:</strong> ${formatDate(report.reportedAt)}</p>
+                    </div>`,
+                    `<button data-action="dismissReport" data-id="${id}" class="px-4 py-2 bg-gray-500 text-white rounded-lg hover:bg-gray-600">Dismiss</button>
+                     <button data-action="deleteContentAndSuspend" data-id="${id}" class="px-4 py-2 bg-red-600 text-white rounded-lg hover:bg-red-700">Delete Content & Suspend User</button>`
+                );
+                break;
+            case 'dismissReport':
+                await handleReportAction(id, 'dismiss');
+                break;
+            case 'deleteContentAndSuspend':
+                await handleReportAction(id, 'deleteContentAndSuspend');
+                break;
+            case 'scanContent':
+                const input = document.getElementById('community-watch-input').value;
+                const resultContainer = document.getElementById('scan-result-container');
+                const resultLoader = document.getElementById('scan-result-loader');
+                const resultOutput = document.getElementById('scan-result-output');
+
+                if (!input) {
+                    showToast('Please enter text to scan.', true);
+                    return;
+                }
+                if (!GEMINI_API_KEY || GEMINI_API_KEY === "YOUR_GEMINI_API_KEY") {
+                    showToast('Gemini API Key is not configured.', true);
+                    return;
+                }
+
+                resultContainer.style.display = 'block';
+                resultLoader.style.display = 'block';
+                resultOutput.style.display = 'none';
+
+                try {
+                    const prompt = `Analyze the following text for harmful content (like hate speech, harassment, violence, or explicit content). Respond with a single word: "Safe" or "Unsafe". Text: "${input}"`;
+                    const response = await fetch(`https://generativelanguage.googleapis.com/v1beta/models/gemini-1.5-flash:generateContent?key=${GEMINI_API_KEY}`, {
+                        method: 'POST',
+                        headers: { 'Content-Type': 'application/json' },
+                        body: JSON.stringify({ contents: [{ parts: [{ text: prompt }] }] })
+                    });
+                    if (!response.ok) {
+                         const errorBody = await response.text();
+                         throw new Error(`API Error: ${response.status} ${response.statusText} - ${errorBody}`);
+                    }
+                    const result = await response.json();
+                    const text = result.candidates[0].content.parts[0].text.trim();
+                    resultOutput.textContent = `Result: ${text}`;
+                    resultOutput.className = `p-4 border rounded-lg ${text.includes('Unsafe') ? 'bg-red-100 border-red-300' : 'bg-green-100 border-green-300'}`;
+                } catch (error) {
+                    console.error("Gemini API Error:", error);
+                    resultOutput.textContent = `Error: ${error.message}`;
+                    resultOutput.className = 'p-4 border rounded-lg bg-red-100 border-red-300';
+                } finally {
+                    resultLoader.style.display = 'none';
+                    resultOutput.style.display = 'block';
+                }
+                break;
+            case 'saveSettings':
+                try {
+                    targetElement.disabled = true;
+                    targetElement.textContent = 'Saving...';
+                    const settingsRef = db.collection("settings").doc("platform");
+                    const newSettings = {
+                        commissionRate: Number(document.getElementById('commission-rate').value),
+                        freeTaskLimit: Number(document.getElementById('free-task-limit').value),
+                        referralBonus: Number(document.getElementById('referral-bonus').value)
+                    };
+                    await settingsRef.set(newSettings, { merge: true });
+                    showToast('Settings saved successfully.');
+                } catch (error) {
+                    console.error("Error saving settings:", error);
+                    showToast('Failed to save settings.', true);
+                } finally {
+                    targetElement.disabled = false;
+                    targetElement.textContent = 'Save Settings';
+                }
+                break;
+            case 'closeModal':
+                hideModal();
+                break;
+            case 'logout':
+                await auth.signOut();
+                break;
+        case 'approveEligibility': {
+  const { user, cat } = targetElement.dataset;
+  targetElement.disabled = true;
+  targetElement.textContent = 'Approving…';
+  try {
+    await updateEligibility(user, cat, {
+      status: 'approved',
+      reviewedBy: auth.currentUser?.uid || null,
+      reviewedAt: firebase.firestore.FieldValue.serverTimestamp()
+    });
+    showToast('Eligibility approved.');
+  } catch (e) {
+    showToast(e.message || 'Failed to approve.', true);
+  } finally {
+    targetElement.disabled = false;
+    targetElement.textContent = 'Approve';
+  }
+  break;
+}
+case 'rejectEligibility': {
+  const { user, cat } = targetElement.dataset;
+  const notes = prompt('Optional notes for rejection:', '');
+  targetElement.disabled = true;
+  targetElement.textContent = 'Rejecting…';
+  try {
+    await updateEligibility(user, cat, {
+      status: 'rejected',
+      notes: notes || null,
+      reviewedBy: auth.currentUser?.uid || null,
+      reviewedAt: firebase.firestore.FieldValue.serverTimestamp()
+    });
+    showToast('Eligibility rejected.');
+  } catch (e) {
+    showToast(e.message || 'Failed to reject.', true);
+  } finally {
+    targetElement.disabled = false;
+    targetElement.textContent = 'Reject';
+  }
+  break;
+}
+case 'requestEligibilityReupload': {
+  const { user, cat } = targetElement.dataset;
+  const ask = prompt('List required docs (comma separated) or leave blank for “all”', '');
+  targetElement.disabled = true;
+  targetElement.textContent = 'Requesting…';
+  try {
+    await updateEligibility(user, cat, {
+      status: 'needs_more_info',
+      requiredDocs: ask ? ask.split(',').map(s => s.trim()).filter(Boolean) : ['all'],
+      requestedAt: firebase.firestore.FieldValue.serverTimestamp()
+    });
+    showToast('Reupload requested.');
+  } catch (e) {
+    showToast(e.message || 'Failed to request.', true);
+  } finally {
+    targetElement.disabled = false;
+    targetElement.textContent = 'Need more info';
+  }
+  break;
+}
+case 'openDocPreview': {
+  const url = targetElement.dataset.url;
+  if (url) openDocPreview(url);
+  break;
+}
+case 'closeDocPreview': {
+  closeDocPreview();
+  break;
+}
+
+case 'openLegacyVerification': {
+  try { renderVerificationsLegacy(); } catch (e) { showToast('Legacy view unavailable.', true); }
+  break;
+}
+
+case 'approveProof': {
+  const docId = targetElement.dataset.id;
+  if (!docId) break;
+  targetElement.disabled = true; targetElement.textContent = 'Approving…';
+  try {
+    await db.collection('category_proofs').doc(docId).set({
+      status: 'approved',
+      reviewedBy: auth.currentUser?.uid || null,
+      reviewedAt: firebase.firestore.FieldValue.serverTimestamp(),
+      updatedAt: firebase.firestore.FieldValue.serverTimestamp()
+    }, { merge: true });
+    try { await functions.httpsCallable('recomputeAllowedForUser')({ uid: docId.split('_')[0] }); } catch (_) {}
+    showToast('Approved.');
+  } catch (e) { showToast(e.message || 'Failed', true); }
+  finally { targetElement.disabled = false; targetElement.textContent = 'Approve'; }
+  break;
+}
+case 'rejectProof': {
+  const docId = targetElement.dataset.id;
+  const note = prompt('Rejection note (optional):','');
+  targetElement.disabled = true; targetElement.textContent = 'Rejecting…';
+  try {
+    await db.collection('category_proofs').doc(docId).set({
+      status: 'rejected',
+      notes: note || null,
+      reviewedBy: auth.currentUser?.uid || null,
+      reviewedAt: firebase.firestore.FieldValue.serverTimestamp(),
+      updatedAt: firebase.firestore.FieldValue.serverTimestamp()
+    }, { merge: true });
+    showToast('Rejected.');
+  } catch (e) { showToast(e.message || 'Failed', true); }
+  finally { targetElement.disabled = false; targetElement.textContent = 'Reject'; }
+  break;
+}
+case 'needsInfoProof': {
+  const docId = targetElement.dataset.id;
+  const note = prompt('What is missing? (note required)','');
+  if (!note || !note.trim()) { showToast('Note is required.', true); break; }
+  targetElement.disabled = true; targetElement.textContent = 'Requesting…';
+  try {
+    await db.collection('category_proofs').doc(docId).set({
+      status: 'needs_more_info',
+      notes: note.trim(),
+      requestedAt: firebase.firestore.FieldValue.serverTimestamp(),
+      updatedAt: firebase.firestore.FieldValue.serverTimestamp()
+    }, { merge: true });
+    showToast('Requested more info.');
+  } catch (e) { showToast(e.message || 'Failed', true); }
+  finally { targetElement.disabled = false; targetElement.textContent = 'Need info'; }
+  break;
+}
+case 'approveBasic': {
+  const uid = targetElement.dataset.uid;
+  const note = prompt('Optional note','') || null;
+  targetElement.disabled = true; targetElement.textContent = 'Approving…';
+  try {
+    await db.collection('basic_docs').doc(uid).set({
+      status: 'approved',
+      notes: note,
+      reviewedBy: auth.currentUser && auth.currentUser.uid || null,
+      reviewedAt: firebase.firestore.FieldValue.serverTimestamp(),
+      updatedAt: firebase.firestore.FieldValue.serverTimestamp()
+    }, { merge: true });
+    try { await functions.httpsCallable('recomputeAllowedForUser')({ uid }); } catch (_) {}
+    showToast('Basic docs approved.');
+  } catch (e) { showToast(e.message || 'Failed', true); }
+  finally { targetElement.disabled = false; targetElement.textContent = 'Approve'; }
+  break;
+}
+case 'rejectBasic': {
+  const uid = targetElement.dataset.uid;
+  const note = prompt('Rejection note (required)','');
+  if (!note || !note.trim()) { showToast('Note is required.', true); break; }
+  targetElement.disabled = true; targetElement.textContent = 'Rejecting…';
+  try {
+    await db.collection('basic_docs').doc(uid).set({
+      status: 'rejected',
+      notes: note.trim(),
+      reviewedBy: auth.currentUser && auth.currentUser.uid || null,
+      reviewedAt: firebase.firestore.FieldValue.serverTimestamp(),
+      updatedAt: firebase.firestore.FieldValue.serverTimestamp()
+    }, { merge: true });
+    try { await functions.httpsCallable('recomputeAllowedForUser')({ uid }); } catch (_) {}
+    showToast('Basic docs rejected.');
+  } catch (e) { showToast(e.message || 'Failed', true); }
+  finally { targetElement.disabled = false; targetElement.textContent = 'Reject'; }
+  break;
+}
+case 'needsInfoBasic': {
+  const uid = targetElement.dataset.uid;
+  const note = prompt('What is missing? (required)','');
+  if (!note || !note.trim()) { showToast('Note is required.', true); break; }
+  targetElement.disabled = true; targetElement.textContent = 'Requesting…';
+  try {
+    await db.collection('basic_docs').doc(uid).set({
+      status: 'needs_more_info',
+      notes: note.trim(),
+      requestedAt: firebase.firestore.FieldValue.serverTimestamp(),
+      updatedAt: firebase.firestore.FieldValue.serverTimestamp()
+    }, { merge: true });
+    showToast('Requested more info from user.');
+  } catch (e) { showToast(e.message || 'Failed', true); }
+  finally { targetElement.disabled = false; targetElement.textContent = 'Need info'; }
+  break;
+}
+}
+    });
+
+    // --- Modal Logic ---
+    const modal = document.getElementById('details-modal');
+    function showModal(title, content, footerContent = '') {
+        modal.querySelector('#modal-title').innerHTML = title;
+        modal.querySelector('#modal-body').innerHTML = content;
+        modal.querySelector('#modal-footer').innerHTML = footerContent || `<button data-action="closeModal" class="px-4 py-2 bg-gray-200 text-gray-800 rounded-lg hover:bg-gray-300">Close</button>`;
+        modal.style.zIndex = 50;
+        modal.classList.remove('hidden-content');
+        requestAnimationFrame(() => {
+            modal.classList.remove('opacity-0');
+            modal.querySelector('.modal-container').classList.remove('scale-95');
+        });
+    }
+    function hideModal() {
+        modal.classList.add('opacity-0');
+        modal.querySelector('.modal-container').classList.add('scale-95');
+        setTimeout(() => {
+            modal.classList.add('hidden-content');
+            modal.style.zIndex = -10;
+        }, 300);
+    }
+
+    // --- Disputes ---
+    function renderDisputes() {
+        const disputes = state.disputes || [];
+        mainContent.innerHTML = `
+          <h1 class="text-3xl font-bold mb-4">Disputes</h1>
+          <div class="flex gap-3 mb-3">
+            <select id="disputeStatus" class="border rounded px-3 py-2">
+              <option value="all">All</option>
+              <option value="open" selected>Open</option>
+              <option value="resolved">Resolved</option>
+              <option value="rejected">Rejected</option>
+            </select>
+            <input id="disputeSearch" class="border rounded px-3 py-2 flex-1" placeholder="Search reason / taskId / userId"/>
+          </div>
+          <div class="bg-white rounded shadow overflow-auto">
+            <table class="min-w-full text-sm">
+              <thead class="bg-gray-50"><tr>
+                <th class="text-left p-3">ID</th>
+                <th class="text-left p-3">Task</th>
+                <th class="text-left p-3">Raised By</th>
+                <th class="text-left p-3">Status</th>
+                <th class="text-left p-3">Reason</th>
+                <th class="text-left p-3">Created</th>
+                <th class="text-right p-3">Action</th>
+              </tr></thead>
+              <tbody id="disputeRows"></tbody>
+            </table>
+          </div>`;
+        const statusSel = document.getElementById('disputeStatus');
+        const search = document.getElementById('disputeSearch');
+        const tbody = document.getElementById('disputeRows');
+        function paint() {
+          const q = (search.value || '').toLowerCase();
+          const want = statusSel.value;
+          const rows = (disputes || [])
+            .filter(d => want === 'all' ? true : (d.status === want))
+            .filter(d => [d.id,d.taskId,d.raisedBy,d.reason].join(' ').toLowerCase().includes(q))
+            .map(d => `
+              <tr class="border-t">
+                <td class="p-3 font-mono">${d.id}</td>
+                <td class="p-3">${d.taskId||''}</td>
+                <td class="p-3">${d.raisedBy||''}</td>
+                <td class="p-3"><span class="px-2 py-1 rounded text-xs ${d.status==='open'?'bg-amber-100 text-amber-800':d.status==='resolved'?'bg-green-100 text-green-800':'bg-red-100 text-red-800'}">${d.status}</span></td>
+                <td class="p-3">${d.reason||''}</td>
+                <td class="p-3">${d.createdAt?.toDate ? d.createdAt.toDate().toLocaleString() : ''}</td>
+                <td class="p-3 text-right">
+                  <button data-id="${d.id}" class="resolve-btn inline-flex items-center px-3 py-1.5 rounded bg-teal-600 text-white hover:bg-teal-700">Resolve</button>
+                </td>
+              </tr>`).join('');
+          tbody.innerHTML = rows || `<tr><td class="p-6 text-center text-gray-500" colspan="7">No disputes</td></tr>`;
+          tbody.querySelectorAll('.resolve-btn').forEach(btn => btn.addEventListener('click', async (e) => {
+            const id = e.currentTarget.dataset.id;
+            const resolution = prompt("Resolution (upheld_poster | upheld_helper | partial | void):","upheld_poster");
+            if (!resolution) return;
+            const posterDelta = parseInt(prompt("Poster coin Δ (e.g., -5, 0, +3):","0"))||0;
+            const helperDelta = parseInt(prompt("Helper coin Δ:","0"))||0;
+            const notes = prompt("Notes (optional):","");
+            try {
+              await functions.httpsCallable('resolveDisputeAdmin')({disputeId:id, resolution, posterDelta, helperDelta, notes});
+              showToast('Dispute resolved.');
+            } catch (err) { showToast(err.message||'Failed', true); }
+          }));
+        }
+        statusSel.addEventListener('change', paint);
+        search.addEventListener('input', paint);
+        paint();
+    }
+
+    // --- Ledger ---
+    function renderLedger() {
+        const tx = state.transactions || [];
+        mainContent.innerHTML = `
+          <h1 class="text-3xl font-bold mb-4">Ledger</h1>
+          <div class="grid grid-cols-1 md:grid-cols-4 gap-3 mb-3">
+            <input id="txUser" class="border rounded px-3 py-2" placeholder="User ID filter"/>
+            <input id="txType" class="border rounded px-3 py-2" placeholder="Type (e.g., boost_post)"/>
+            <input id="txFrom" class="border rounded px-3 py-2" type="date"/>
+            <input id="txTo" class="border rounded px-3 py-2" type="date"/>
+          </div>
+          <div class="flex gap-2 mb-3">
+            <button id="exportCsv" class="px-3 py-1.5 rounded bg-teal-600 text-white hover:bg-teal-700">Export CSV</button>
+          </div>
+          <div class="bg-white rounded shadow overflow-auto">
+            <table class="min-w-full text-sm">
+              <thead class="bg-gray-50"><tr>
+                <th class="text-left p-3">When</th><th class="text-left p-3">User</th><th class="text-left p-3">Type</th><th class="text-right p-3">Amount</th><th class="text-left p-3">Task</th><th class="text-left p-3">Notes</th>
+              </tr></thead>
+              <tbody id="txRows"></tbody>
+            </table>
+          </div>`;
+        const fUser = document.getElementById('txUser');
+        const fType = document.getElementById('txType');
+        const fFrom = document.getElementById('txFrom');
+        const fTo = document.getElementById('txTo');
+        const tbody = document.getElementById('txRows');
+        function asCsv(rows) {
+          const header = ['createdAt','userId','type','amount','taskId','notes'];
+          const lines = [header.join(',')].concat(rows.map(m => [
+            m.createdAt?.toDate ? m.createdAt.toDate().toISOString() : '',
+            m.userId||'', m.type||'', m.amount||0, m.taskId||'', (m.notes||'').replace(/,/g,';')
+          ].join(',')));
+          const blob = new Blob([lines.join('\n')], {type: 'text/csv'});
+          const url = URL.createObjectURL(blob);
+          const a = document.createElement('a');
+          a.href = url; a.download = 'ledger.csv'; a.click();
+          URL.revokeObjectURL(url);
+        }
+        function paint() {
+          const u = fUser.value.trim(); const t = fType.value.trim().toLowerCase();
+          const from = fFrom.value ? new Date(fFrom.value) : null;
+          const to = fTo.value ? new Date(fTo.value+'T23:59:59') : null;
+          const rows = tx.filter(m => (!u || m.userId===u) && (!t || (m.type||'').toLowerCase().includes(t)) && (!from || (m.createdAt?.toDate && m.createdAt.toDate()>=from)) && (!to || (m.createdAt?.toDate && m.createdAt.toDate()<=to)));
+          tbody.innerHTML = rows.map(m => `
+            <tr class="border-t">
+              <td class="p-3">${m.createdAt?.toDate ? m.createdAt.toDate().toLocaleString() : ''}</td>
+              <td class="p-3 font-mono">${m.userId||''}</td>
+              <td class="p-3">${m.type||''}</td>
+              <td class="p-3 text-right ${m.amount<0?'text-red-600':'text-green-700'}">${m.amount||0}</td>
+              <td class="p-3 font-mono">${m.taskId||''}</td>
+              <td class="p-3">${m.notes||''}</td>
+            </tr>`).join('');
+          if (!rows.length) tbody.innerHTML = `<tr><td class="p-6 text-center text-gray-500" colspan="6">No transactions</td></tr>`;
+          document.getElementById('exportCsv').onclick = () => asCsv(rows);
+        }
+        [fUser,fType,fFrom,fTo].forEach(el => el.addEventListener('input', paint));
+        paint();
+    }
+
+    // --- Payouts ---
+    function renderPayouts() {
+        const payouts = state.payouts || [];
+        mainContent.innerHTML = `
+          <h1 class="text-3xl font-bold mb-4">Payouts</h1>
+          <div class="flex gap-2 mb-3">
+            <button id="newBatch" class="px-3 py-1.5 rounded bg-teal-600 text-white hover:bg-teal-700">Create batch</button>
+          </div>
+          <div class="bg-white rounded shadow overflow-auto">
+            <table class="min-w-full text-sm">
+              <thead class="bg-gray-50"><tr>
+                <th class="p-3 text-left">Batch</th><th class="p-3 text-left">Status</th><th class="p-3 text-left">Total</th><th class="p-3 text-left">Lines</th><th class="p-3 text-left">Created</th><th class="p-3 text-right">Action</th>
+              </tr></thead>
+              <tbody id="payRows"></tbody>
+            </table>
+          </div>`;
+        const tbody = document.getElementById('payRows');
+        tbody.innerHTML = (payouts || []).map(p => `
+          <tr class="border-t">
+            <td class="p-3 font-mono">${p.id}</td>
+            <td class="p-3">${p.status||'pending'}</td>
+            <td class="p-3">LKR ${p.total||0}</td>
+            <td class="p-3">${(p.lines||[]).length||0}</td>
+            <td class="p-3">${p.createdAt?.toDate ? p.createdAt.toDate().toLocaleString() : ''}</td>
+            <td class="p-3 text-right">
+              ${p.status!=='paid' ? `<button data-id="${p.id}" class="markPaid px-3 py-1.5 bg-green-600 text-white rounded hover:bg-green-700">Mark paid</button>` : ''}
+            </td>
+          </tr>`).join('') || `<tr><td class="p-6 text-center text-gray-500" colspan="6">No batches</td></tr>`;
+        document.getElementById('newBatch').onclick = async () => {
+          const raw = prompt("Enter lines: one per row 'userId,amount'", "");
+          if (!raw) return;
+          const lines = raw.split(/\n/).map(s => s.trim()).filter(Boolean).map(s => {
+            const [u,amt] = s.split(','); return {userId: (u||'').trim(), amount: parseInt((amt||'0').trim())||0};
+          });
+          try {
+            await functions.httpsCallable('createPayoutBatch')({lines});
+            showToast('Batch created.');
+          } catch (e) { showToast(e.message||'Failed', true); }
+        };
+        tbody.querySelectorAll('.markPaid').forEach(btn => btn.addEventListener('click', async (e) => {
+          const id = e.currentTarget.dataset.id;
+          const txId = prompt("Enter PSP payout reference / tx id:","");
+          if (!txId) return;
+          try {
+            await functions.httpsCallable('markPayoutPaid')({batchId:id, txId});
+            showToast('Batch marked paid.');
+          } catch (e) { showToast(e.message||'Failed', true); }
+        }));
+    }
+
+    // --- Campaigns ---
+    function renderCampaigns() {
+        const last = state.campaigns || [];
+        mainContent.innerHTML = `
+          <h1 class="text-3xl font-bold mb-4">Campaigns</h1>
+          <div class="grid grid-cols-1 lg:grid-cols-3 gap-4">
+            <div class="bg-white rounded shadow p-4">
+              <h3 class="font-semibold mb-2">Compose push</h3>
+              <input id="campTitle" class="border rounded px-3 py-2 mb-2 w-full" placeholder="Title">
+              <textarea id="campBody" class="border rounded px-3 py-2 mb-2 w-full" placeholder="Body"></textarea>
+              <input id="campCategory" class="border rounded px-3 py-2 mb-2 w-full" placeholder="Category id (optional)">
+              <input id="campCity" class="border rounded px-3 py-2 mb-2 w-full" placeholder="City slug (optional)">
+              <input id="campTrust" class="border rounded px-3 py-2 mb-2 w-full" placeholder="Min trust (0-100, optional)">
+              <button id="sendCamp" class="px-3 py-1.5 rounded bg-teal-600 text-white hover:bg-teal-700 w-full">Send</button>
+            </div>
+            <div class="lg:col-span-2 bg-white rounded shadow p-4 overflow-auto">
+              <h3 class="font-semibold mb-2">Recent sends</h3>
+              <table class="min-w-full text-sm">
+                <thead class="bg-gray-50"><tr><th class="p-2 text-left">When</th><th class="p-2 text-left">Title</th><th class="p-2 text-left">Audience</th></tr></thead>
+                <tbody>${(last||[]).slice(0,50).map(c => `<tr class="border-t"><td class="p-2">${c.createdAt?.toDate?c.createdAt.toDate().toLocaleString():''}</td><td class="p-2">${c.title||''}</td><td class="p-2">${c.audience||''}</td></tr>`).join('')||'<tr><td class="p-4 text-gray-500" colspan="3">No campaigns</td></tr>'}</tbody>
+              </table>
+            </div>
+          </div>`;
+        document.getElementById('sendCamp').onclick = async () => {
+          const payload = {
+            title: document.getElementById('campTitle').value.trim(),
+            body: document.getElementById('campBody').value.trim(),
+            category: document.getElementById('campCategory').value.trim(),
+            city: document.getElementById('campCity').value.trim(),
+            trustMin: parseInt(document.getElementById('campTrust').value.trim())||null
+          };
+          try {
+            await functions.httpsCallable('sendCampaign')(payload);
+            showToast('Campaign sent.');
+          } catch (e) { showToast(e.message||'Failed', true); }
+        };
+    }
+
+    // --- Feature Flags (platform settings doc) ---
+    function renderFlags() {
+        const s = state.settings || {};
+        mainContent.innerHTML = `
+          <h1 class="text-3xl font-bold mb-4">Feature Flags</h1>
+          <div class="bg-white rounded shadow p-4 max-w-2xl">
+            <div class="grid grid-cols-1 md:grid-cols-2 gap-4">
+              ${flagInput('boostCostCoins', s.boostCostCoins ?? 3, 'Boost cost (coins)')}
+              ${flagInput('minPosterCoins', s.minPosterCoins ?? 100, 'Min poster balance')}
+              ${flagInput('minHelperCoins', s.minHelperCoins ?? 200, 'Min helper balance')}
+              ${flagInput('commissionPercent', s.commissionPercent ?? 8, 'Helper commission %')}
+            </div>
+            <div class="mt-4 text-right">
+              <button id="saveFlags" class="px-3 py-1.5 rounded bg-teal-600 text-white hover:bg-teal-700">Save</button>
+            </div>
+          </div>`;
+        function flagInput(id, val, label) {
+          return `<label class="block"><span class="text-sm text-gray-600">${label}</span><input id="${id}" class="border rounded px-3 py-2 w-full" type="number" value="${val}"></label>`;
+        }
+        document.getElementById('saveFlags').onclick = async () => {
+          const doc = {
+            boostCostCoins: parseInt(document.getElementById('boostCostCoins').value)||3,
+            minPosterCoins: parseInt(document.getElementById('minPosterCoins').value)||100,
+            minHelperCoins: parseInt(document.getElementById('minHelperCoins').value)||200,
+            commissionPercent: parseInt(document.getElementById('commissionPercent').value)||8,
+            updatedAt: firebase.firestore.FieldValue.serverTimestamp(),
+          };
+          try {
+            await db.collection('settings').doc('platform').set(doc, {merge:true});
+            showToast('Flags updated.');
+          } catch (e) { showToast(e.message||'Failed', true); }
+        };
+    }
+
+
+
+function renderVerificationsLegacy() {
+         mainContent.innerHTML = `
+            <h1 class="text-4xl font-bold mb-8">Verification Hub</h1>
+            <div class="bg-white shadow rounded-lg overflow-hidden">
+                <table class="min-w-full leading-normal"><thead class="border-b-2 border-gray-200 bg-gray-100 text-left text-sm font-semibold text-gray-600 uppercase tracking-wider"><tr><th class="px-5 py-3">User</th><th class="px-5 py-3">Document Type</th><th class="px-5 py-3">Submitted At</th><th class="px-5 py-3">Status</th><th class="px-5 py-3">Actions</th></tr></thead><tbody id="verification-table-body"></tbody></table>
+            </div>`;
+        const tbody = document.getElementById('verification-table-body');
+        if (state.verifications.length === 0) return renderEmptyState(tbody, 5, "No verification requests.");
+        tbody.innerHTML = state.verifications.map(v => `
+            <tr class="border-b border-gray-200 hover:bg-gray-50">
+                <td class="px-5 py-4">${v.userName || 'N/A'}</td>
+                <td class="px-5 py-4">${v.documentType || 'N/A'}</td>
+                <td class="px-5 py-4">${formatDate(v.submittedAt)}</td>
+                <td class="px-5 py-4">${createStatusBadge(v.status)}</td>
+                <td class="px-5 py-4"><button data-action="viewVerification" data-id="${v.id}" class="px-3 py-1 rounded bg-teal-50 text-teal-700 hover:bg-teal-100 border border-teal-200">Review</button></td>
+            </tr>`).join('');
+    }
+</script>
+
+
+<!-- Document Preview Lightbox -->
+<div id="docPreview" class="fixed inset-0 bg-black/70 hidden items-center justify-center z-50">
+    <div class="bg-white rounded-lg shadow-xl max-w-5xl w-[90vw] h-[85vh] relative">
+        <button data-action="closeDocPreview"
+                class="absolute top-2 right-2 p-2 rounded-full bg-black/70 text-white hover:bg-black/80"
+                aria-label="Close preview">✕</button>
+        <div id="docPreviewContent" class="w-full h-full"></div>
+    </div>
+</div>
+</body>
+</html>

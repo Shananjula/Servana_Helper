@@ -1,739 +1,686 @@
+// lib/screens/conversation_screen.dart
+//
+// ConversationScreen (Phase 1 — richer chat)
+// ------------------------------------------
+// Works with either:
+//   ConversationScreen(channelId: '<chat|pair id>')
+// or
+//   ConversationScreen(otherUserId: '<uid>', otherUserName: 'Name')
+//
+// Adds in Phase 1:
+//  • Image sending (gallery) → Firebase Storage
+//  • Typing indicators (typing.{uid} = true + typingAt.{uid})
+//  • Read receipts (readBy.{uid} = true best-effort on visible messages)
+//  • Long-press on a message: Copy (text), Star/Unstar, Delete for me
+//
+// Collections (tolerant):
+//   chats/{id} or pairs/{id} {
+//     participants: [uidA, uidB], lastMessage, updatedAt, typing?:{uid:true}, typingAt?:{uid:ts}
+//   }
+//   .../messages/{mid} {
+//     type: 'text'|'image', text?, imageUrl?,
+//     senderId, timestamp, readBy?:{uid:true}, starredBy?:{uid:true}, deletedFor?:{uid:true}
+//   }
+
 import 'dart:async';
 import 'dart:io';
 
-import 'package:flutter/material.dart';
 import 'package:cloud_firestore/cloud_firestore.dart';
 import 'package:firebase_auth/firebase_auth.dart';
-import 'package:intl/intl.dart';
-import 'package:firebase_storage/firebase_storage.dart' hide Task;
-import 'package:servana/models/user_model.dart';
-import 'package:servana/services/ai_service.dart';
-import 'package:servana/services/firestore_service.dart';
+import 'package:firebase_storage/firebase_storage.dart';
+import 'package:flutter/material.dart';
+import 'package:flutter/services.dart';
 import 'package:image_picker/image_picker.dart';
-import 'package:url_launcher/url_launcher.dart';
-
-import '../models/chat_message_model.dart';
-import '../models/task_model.dart';
+import 'package:servana/services/quick_replies_service.dart';
 
 class ConversationScreen extends StatefulWidget {
-  final String chatChannelId;
-  final String otherUserName;
-  final String? otherUserAvatarUrl;
-  final String taskTitle;
-
   const ConversationScreen({
-    Key? key,
-    required this.chatChannelId,
-    required this.otherUserName,
-    this.otherUserAvatarUrl,
-    required this.taskTitle,
-  }) : super(key: key);
+    super.key,
+    this.channelId,
+    this.otherUserId,
+    this.otherUserName,
+  });
+
+  final String? channelId;
+  final String? otherUserId;
+  final String? otherUserName;
 
   @override
   State<ConversationScreen> createState() => _ConversationScreenState();
 }
 
 class _ConversationScreenState extends State<ConversationScreen> {
-  final TextEditingController _messageController = TextEditingController();
-  final ScrollController _scrollController = ScrollController();
-  final String _currentUserId = FirebaseAuth.instance.currentUser!.uid;
-  final FirestoreService _firestoreService = FirestoreService();
+  final _msgCtrl = TextEditingController();
+  final _scrollCtrl = ScrollController();
 
-  HelpifyUser? _otherUser;
-  bool _isUploadingFile = false;
-  Map<String, dynamic>? _smartAction;
-  Timer? _debounce;
+  String? _meId;
+  String? _chatId;
+  String? _otherId;
+  String? _otherName;
+  String _coll = 'chats'; // 'chats' or 'pairs'
+  bool _bootstrapping = true;
+
+  // typing indicator
+  Timer? _typingTimer;
 
   @override
   void initState() {
     super.initState();
-    _fetchOtherUserData();
-    _messageController.addListener(_onTextChanged);
+    _bootstrap();
+    _msgCtrl.addListener(_onComposerChanged);
   }
 
   @override
   void dispose() {
-    _debounce?.cancel();
-    _messageController.removeListener(_onTextChanged);
-    _messageController.dispose();
-    _scrollController.dispose();
+    _msgCtrl.removeListener(_onComposerChanged);
+    _msgCtrl.dispose();
+    _typingOffDebounced();
     super.dispose();
   }
 
-  void _onTextChanged() {
-    if (_debounce?.isActive ?? false) _debounce!.cancel();
-    _debounce = Timer(const Duration(milliseconds: 800), () {
-      if (!mounted) return;
-      if (_messageController.text.trim().length > 10) {
-        _checkForSmartActions();
-      } else if (_smartAction != null) {
-        setState(() => _smartAction = null);
-      }
-    });
-  }
-
-  Future<void> _checkForSmartActions() async {
-    final action = await AiService.getSmartChatAction(_messageController.text.trim());
-    if (mounted && action != null) {
-      setState(() => _smartAction = action);
+  Future<void> _bootstrap() async {
+    final me = FirebaseAuth.instance.currentUser;
+    _meId = me?.uid;
+    if (_meId == null) {
+      setState(() => _bootstrapping = false);
+      return;
     }
-  }
 
-  void _executeSmartAction() {
-    if (_smartAction == null) return;
-    final actionType = _smartAction!['action'];
-    ScaffoldMessenger.of(context).showSnackBar(SnackBar(content: Text("Executing AI Action: $actionType")));
-    setState(() => _smartAction = null);
-  }
+    String? chatId = widget.channelId?.trim().isEmpty == true ? null : widget.channelId?.trim();
+    String? otherId = widget.otherUserId?.trim().isEmpty == true ? null : widget.otherUserId?.trim();
 
-  Future<void> _fetchOtherUserData() async {
-    try {
-      final participantIds = widget.chatChannelId.split('_');
-      final otherUserId =
-      participantIds.firstWhere((id) => id != _currentUserId, orElse: () => '');
-
-      if (otherUserId.isNotEmpty) {
-        final userDoc = await FirebaseFirestore.instance
-            .collection('users')
-            .doc(otherUserId)
-            .get();
-        if (userDoc.exists && mounted) {
-          setState(() {
-            _otherUser = HelpifyUser.fromFirestore(userDoc);
-          });
-        }
-      }
-    } catch (e) {
-      print("Error fetching other user's data: $e");
+    if (chatId == null && otherId != null) {
+      chatId = _pairKey(_meId!, otherId);
     }
-  }
 
-  Future<void> _sendMessage({String? imageUrl}) async {
-    final messageText = _messageController.text.trim();
-    if (messageText.isEmpty && imageUrl == null) return;
+    String coll = 'chats';
+    if (chatId != null) {
+      final chatsDoc = await FirebaseFirestore.instance.collection('chats').doc(chatId).get();
+      if (!chatsDoc.exists) {
+        final pairsDoc = await FirebaseFirestore.instance.collection('pairs').doc(chatId).get();
+        coll = pairsDoc.exists ? 'pairs' : 'chats';
+      }
+    }
+
+    // Create shell in /chats if needed
+    if (coll == 'chats' && chatId != null) {
+      final ref = FirebaseFirestore.instance.collection('chats').doc(chatId);
+      final snap = await ref.get();
+      if (!snap.exists) {
+        otherId ??= _otherFromPairKey(chatId, _meId!);
+        await ref.set({
+          'participants': otherId == null ? [_meId] : [_meId, otherId]..sort(),
+          'createdAt': FieldValue.serverTimestamp(),
+          'updatedAt': FieldValue.serverTimestamp(),
+        }, SetOptions(merge: true));
+      } else {
+        final m = snap.data() ?? {};
+        final parts = (m['participants'] is List) ? List<String>.from(m['participants']) : const <String>[];
+        if (parts.isNotEmpty) otherId ??= parts.firstWhere((p) => p != _meId, orElse: () => parts.first);
+      }
+    } else if (coll == 'pairs' && chatId != null) {
+      final ps = await FirebaseFirestore.instance.collection('pairs').doc(chatId).get();
+      final m = ps.data() ?? {};
+      final mem = (m['members'] is List) ? List<String>.from(m['members']) : const <String>[];
+      if (mem.isNotEmpty) otherId ??= mem.firstWhere((p) => p != _meId, orElse: () => mem.first);
+    }
+
+    String? otherName = widget.otherUserName;
+    if ((otherName == null || otherName.trim().isEmpty) && (otherId != null)) {
+      try {
+        final u = await FirebaseFirestore.instance.collection('users').doc(otherId).get();
+        final d = u.data() ?? {};
+        final n = (d['displayName'] ?? '').toString().trim();
+        if (n.isNotEmpty) otherName = n;
+      } catch (_) {}
+    }
 
     setState(() {
-      _isUploadingFile = false;
+      _chatId = chatId;
+      _otherId = otherId;
+      _otherName = otherName?.isNotEmpty == true ? otherName : null;
+      _coll = coll;
+      _bootstrapping = false;
     });
-
-    final message = {
-      'text': messageText,
-      'senderId': _currentUserId,
-      'timestamp': FieldValue.serverTimestamp(),
-      'type': imageUrl != null ? 'image' : 'text',
-      'imageUrl': imageUrl,
-    };
-
-    final messagesRef = FirebaseFirestore.instance
-        .collection('chats')
-        .doc(widget.chatChannelId)
-        .collection('messages');
-    final channelRef =
-    FirebaseFirestore.instance.collection('chats').doc(widget.chatChannelId);
-
-    final batch = FirebaseFirestore.instance.batch();
-    batch.set(messagesRef.doc(), message);
-    batch.update(channelRef, {
-      'lastMessage': imageUrl != null ? 'Photo' : messageText,
-      'lastMessageTimestamp': FieldValue.serverTimestamp(),
-      'lastMessageSenderId': _currentUserId,
-    });
-    await batch.commit();
-
-    _messageController.clear();
-    if (mounted) setState(() => _smartAction = null);
-    _scrollToBottom();
   }
 
-  void _showAttachmentMenu() {
-    showModalBottomSheet(
+  String _pairKey(String a, String b) {
+    final list = [a, b]..sort();
+    return '${list[0]}_${list[1]}';
+  }
+
+  String? _otherFromPairKey(String pair, String me) {
+    if (!pair.contains('_')) return null;
+    final parts = pair.split('_')..sort();
+    if (parts.length != 2) return null;
+    return parts.first == me ? parts[1] : parts.first;
+  }
+
+  // ---------- typing ----------
+
+  void _onComposerChanged() {
+    _setTyping(true);
+    _typingOffDebounced();
+  }
+
+  void _typingOffDebounced() {
+    _typingTimer?.cancel();
+    _typingTimer = Timer(const Duration(seconds: 2), () => _setTyping(false));
+  }
+
+  Future<void> _setTyping(bool typing) async {
+    if (_meId == null || _chatId == null) return;
+    try {
+      await FirebaseFirestore.instance.collection(_coll).doc(_chatId!).set({
+        'typing': {_meId!: typing},
+        'typingAt': {_meId!: FieldValue.serverTimestamp()},
+        'updatedAt': FieldValue.serverTimestamp(),
+      }, SetOptions(merge: true));
+    } catch (_) {}
+  }
+
+  // ---------- send ----------
+
+  Future<void> _sendText() async {
+    final text = _msgCtrl.text.trim();
+    if (text.isEmpty || _meId == null || _chatId == null) return;
+
+    final db = FirebaseFirestore.instance;
+    final root = db.collection(_coll).doc(_chatId!);
+    final msgs = root.collection('messages');
+
+    try {
+      await msgs.add({
+        'type': 'text',
+        'senderId': _meId,
+        'text': text,
+        'timestamp': FieldValue.serverTimestamp(),
+      });
+
+      await root.set({
+        'lastMessage': text,
+        'updatedAt': FieldValue.serverTimestamp(),
+      }, SetOptions(merge: true));
+
+      _msgCtrl.clear();
+      _setTyping(false);
+    } catch (e) {
+      if (!mounted) return;
+      ScaffoldMessenger.of(context).showSnackBar(SnackBar(content: Text('Failed to send: $e')));
+    }
+  }
+
+  Future<void> _sendImage() async {
+    if (_meId == null || _chatId == null) return;
+    try {
+      final x = await ImagePicker().pickImage(source: ImageSource.gallery, imageQuality: 82);
+      if (x == null) return;
+
+      final ref = FirebaseStorage.instance
+          .ref('chat_uploads/${_chatId!}/${DateTime.now().millisecondsSinceEpoch}_${x.name}');
+      await ref.putFile(File(x.path));
+      final url = await ref.getDownloadURL();
+
+      final db = FirebaseFirestore.instance;
+      final root = db.collection(_coll).doc(_chatId!);
+      final msgs = root.collection('messages');
+
+      await msgs.add({
+        'type': 'image',
+        'senderId': _meId,
+        'imageUrl': url,
+        'timestamp': FieldValue.serverTimestamp(),
+      });
+
+      await root.set({
+        'lastMessage': '📷 Photo',
+        'updatedAt': FieldValue.serverTimestamp(),
+      }, SetOptions(merge: true));
+    } catch (e) {
+      if (!mounted) return;
+      ScaffoldMessenger.of(context).showSnackBar(SnackBar(content: Text('Image failed: $e')));
+    }
+  }
+
+  // ---------- read receipts ----------
+
+  Future<void> _markRead(Iterable<QueryDocumentSnapshot<Map<String, dynamic>>> docs) async {
+    if (_meId == null) return;
+    try {
+      final batch = FirebaseFirestore.instance.batch();
+      var count = 0;
+      for (final d in docs) {
+        final m = d.data();
+        if ((m['senderId'] ?? '') == _meId) continue;
+        final readMap = (m['readBy'] is Map) ? Map<String, dynamic>.from(m['readBy']) : <String, dynamic>{};
+        if (readMap[_meId] == true) continue;
+        batch.set(d.reference, {'readBy.${_meId!}': true}, SetOptions(merge: true));
+        count++;
+        if (count >= 30) break; // safety cap
+      }
+      if (count > 0) await batch.commit();
+    } catch (_) {}
+  }
+
+  // ---------- UI ----------
+
+  @override
+  Widget build(BuildContext context) {
+    final cs = Theme.of(context).colorScheme;
+    final title = _otherName ?? (_otherId != null ? 'Chat' : 'Conversation');
+
+    return Scaffold(
+      appBar: AppBar(
+        title: FutureBuilder<DocumentSnapshot<Map<String, dynamic>>>(
+          future: _otherId == null ? null : FirebaseFirestore.instance.collection('users').doc(_otherId).get(),
+          builder: (context, usnap) {
+            final verified = (usnap.data?.data()?['verificationStatus'] ?? '').toString().toLowerCase().contains('verified');
+            return Row(
+              mainAxisSize: MainAxisSize.min,
+              children: [
+                Flexible(child: Text(title, overflow: TextOverflow.ellipsis)),
+                if (verified) ...[
+                  const SizedBox(width: 6),
+                  Icon(Icons.verified_rounded, size: 18, color: Colors.green.shade700),
+                ],
+              ],
+            );
+          },
+        ),
+        centerTitle: false,
+      ),
+      backgroundColor: cs.background,
+      body: _bootstrapping
+          ? const Center(child: CircularProgressIndicator())
+          : (_chatId == null && _otherId == null)
+          ? const Center(child: Text('Missing chat identifiers.'))
+          : Column(
+        children: [
+          // typing banner
+          _TypingBanner(coll: _coll, chatId: _chatId!, meId: _meId!),
+
+          Expanded(
+              child: _MessagesList(
+                coll: _coll,
+                chatId: _chatId!,
+                meId: _meId!,
+                onBatchShown: _markRead,
+              )),
+
+          _QuickRepliesBar(
+            onPick: (text) {
+              final current = _msgCtrl.text.trim();
+              _msgCtrl.text = current.isEmpty ? text : '$current $text';
+              _msgCtrl.selection = TextSelection.fromPosition(TextPosition(offset: _msgCtrl.text.length));
+            },
+            onManage: () => _openManageReplies(context),
+          ),
+
+          _Composer(
+            enabled: _meId != null && _chatId != null,
+            controller: _msgCtrl,
+            onSend: _sendText,
+            onImage: _sendImage,
+          ),
+        ],
+      ),
+    );
+  }
+
+  Future<void> _openManageReplies(BuildContext context) async {
+    final current = await QuickRepliesService.streamReplies().first;
+    final ctrl = TextEditingController(text: current.join('\n'));
+    final ok = await showModalBottomSheet<bool>(
       context: context,
-      builder: (context) {
-        return SafeArea(
-          child: Wrap(
+      isScrollControlled: true,
+      useSafeArea: true,
+      showDragHandle: true,
+      builder: (_) => Padding(
+        padding: EdgeInsets.only(bottom: MediaQuery.of(context).viewInsets.bottom),
+        child: SingleChildScrollView(
+          padding: const EdgeInsets.fromLTRB(16, 8, 16, 16),
+          child: Column(
+            crossAxisAlignment: CrossAxisAlignment.start,
             children: [
-              ListTile(
-                leading: const Icon(Icons.photo_library),
-                title: const Text('Gallery'),
-                onTap: () {
-                  Navigator.of(context).pop();
-                  _shareFile(ImageSource.gallery);
-                },
+              const Text('Quick replies', style: TextStyle(fontSize: 18, fontWeight: FontWeight.w800)),
+              const SizedBox(height: 8),
+              Text(
+                'One reply per line (max 6).',
+                style: TextStyle(color: Theme.of(context).colorScheme.onSurfaceVariant),
               ),
-              ListTile(
-                leading: const Icon(Icons.camera_alt),
-                title: const Text('Camera'),
-                onTap: () {
-                  Navigator.of(context).pop();
-                  _shareFile(ImageSource.camera);
-                },
+              const SizedBox(height: 8),
+              TextField(
+                controller: ctrl,
+                minLines: 6,
+                maxLines: 10,
+                decoration: const InputDecoration(
+                  border: OutlineInputBorder(),
+                  hintText: 'Type one quick reply per line…',
+                ),
+              ),
+              const SizedBox(height: 12),
+              Row(
+                children: [
+                  Expanded(
+                    child: FilledButton.icon(
+                      icon: const Icon(Icons.save_rounded),
+                      label: const Text('Save'),
+                      onPressed: () => Navigator.pop(context, true),
+                    ),
+                  ),
+                ],
               ),
             ],
           ),
+        ),
+      ),
+    );
+
+    if (ok == true) {
+      final lines = ctrl.text.split('\n').map((e) => e.trim()).where((e) => e.isNotEmpty).toList();
+      await QuickRepliesService.saveReplies(lines);
+      if (context.mounted) {
+        ScaffoldMessenger.of(context).showSnackBar(const SnackBar(content: Text('Quick replies saved')));
+      }
+    }
+  }
+}
+
+class _TypingBanner extends StatelessWidget {
+  const _TypingBanner({required this.coll, required this.chatId, required this.meId});
+  final String coll;
+  final String chatId;
+  final String meId;
+
+  @override
+  Widget build(BuildContext context) {
+    final ref = FirebaseFirestore.instance.collection(coll).doc(chatId);
+    return StreamBuilder<DocumentSnapshot<Map<String, dynamic>>>(
+      stream: ref.snapshots(),
+      builder: (_, snap) {
+        final m = snap.data?.data() ?? {};
+        final typing = (m['typing'] is Map) ? Map<String, dynamic>.from(m['typing']) : const <String, dynamic>{};
+        final othersTyping = typing.entries.any((e) => e.key != meId && e.value == true);
+        if (!othersTyping) return const SizedBox(height: 0);
+        return Container(
+          width: double.infinity,
+          padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 6),
+          child: Text('Typing…', style: TextStyle(color: Theme.of(context).colorScheme.onSurfaceVariant)),
         );
       },
     );
   }
+}
 
-  Future<void> _shareFile(ImageSource source) async {
-    if (_isUploadingFile) return;
-    setState(() => _isUploadingFile = true);
-    final picker = ImagePicker();
-    final file = await picker.pickImage(source: source, imageQuality: 80);
-    if (file == null) {
-      if (mounted) setState(() => _isUploadingFile = false);
-      return;
-    }
-    try {
-      final fileName =
-          '${_currentUserId}-${DateTime.now().millisecondsSinceEpoch}.jpg';
+class _MessagesList extends StatelessWidget {
+  const _MessagesList({
+    required this.coll,
+    required this.chatId,
+    required this.meId,
+    required this.onBatchShown,
+  });
 
-      final String filePath = 'chat_attachments/${widget.chatChannelId}/$fileName';
-
-      final ref = FirebaseStorage.instance.ref(filePath);
-
-      await ref.putFile(File(file.path));
-      final imageUrl = await ref.getDownloadURL();
-      await _sendMessage(imageUrl: imageUrl);
-
-    } on FirebaseException catch (e) {
-      print("File upload failed. Error: ${e.toString()}");
-      print("Firebase Storage Error Code: ${e.code}");
-      print("Firebase Storage Error Message: ${e.message}");
-      if (mounted) {
-        ScaffoldMessenger.of(context)
-            .showSnackBar(const SnackBar(content: Text("File sharing failed. Please check permissions.")));
-      }
-    } catch (e) {
-      print("An unexpected error occurred during file upload: ${e.toString()}");
-    } finally {
-      if (mounted) setState(() => _isUploadingFile = false);
-    }
-  }
-
-  // --- UPDATED: This function now uses 'phone' instead of 'phoneNumber' ---
-  void _showContactInfoDialog() {
-    if (_otherUser?.phone == null) {
-      ScaffoldMessenger.of(context).showSnackBar(
-        const SnackBar(content: Text("This user has not provided a phone number.")),
-      );
-      return;
-    }
-    showDialog(
-      context: context,
-      builder: (context) => AlertDialog(
-        title: const Text("Contact Information"),
-        content: Column(
-          mainAxisSize: MainAxisSize.min,
-          crossAxisAlignment: CrossAxisAlignment.start,
-          children: [
-            Text(_otherUser!.displayName ?? 'No Name',
-                style: const TextStyle(fontWeight: FontWeight.bold)),
-            const SizedBox(height: 8),
-            Text("Phone: ${_otherUser!.phone!}"),
-          ],
-        ),
-        actions: [
-          TextButton(
-            child: const Text("Close"),
-            onPressed: () => Navigator.of(context).pop(),
-          ),
-          ElevatedButton.icon(
-            icon: const Icon(Icons.call),
-            label: const Text("Call"),
-            onPressed: () async {
-              final Uri phoneUri = Uri(scheme: 'tel', path: _otherUser!.phone!);
-              if (await canLaunchUrl(phoneUri)) {
-                await launchUrl(phoneUri);
-              } else {
-                ScaffoldMessenger.of(context).showSnackBar(
-                  const SnackBar(content: Text("Could not place the call.")),
-                );
-              }
-              Navigator.of(context).pop();
-            },
-          ),
-        ],
-      ),
-    );
-  }
-
-  void _showCounterOfferDialog() {
-    final amountController = TextEditingController();
-    final messageController = TextEditingController();
-    final formKey = GlobalKey<FormState>();
-
-    showDialog(
-      context: context,
-      builder: (context) => AlertDialog(
-        title: const Text("Make a Counter-Offer"),
-        content: Form(
-          key: formKey,
-          child: Column(
-            mainAxisSize: MainAxisSize.min,
-            children: [
-              TextFormField(
-                controller: amountController,
-                keyboardType: TextInputType.number,
-                decoration: const InputDecoration(labelText: "New Offer Amount (LKR)"),
-                validator: (val) => (val == null || val.isEmpty || double.tryParse(val) == null) ? "Invalid amount" : null,
-              ),
-              const SizedBox(height: 16),
-              TextFormField(
-                controller: messageController,
-                decoration: const InputDecoration(labelText: "Optional Message"),
-              ),
-            ],
-          ),
-        ),
-        actions: [
-          TextButton(onPressed: () => Navigator.of(context).pop(), child: const Text("Cancel")),
-          ElevatedButton(
-            onPressed: () {
-              if (formKey.currentState!.validate()) {
-                final amount = double.parse(amountController.text);
-                final message = messageController.text.trim();
-
-                _firestoreService.sendOfferInChat(
-                  chatChannelId: widget.chatChannelId,
-                  senderId: _currentUserId,
-                  text: message.isNotEmpty ? message : "I'd like to make a new offer.",
-                  offerAmount: amount,
-                );
-                Navigator.of(context).pop();
-              }
-            },
-            child: const Text("Send Offer"),
-          ),
-        ],
-      ),
-    );
-  }
-
-  void _scrollToBottom() {
-    if (!_scrollController.hasClients) return;
-    WidgetsBinding.instance.addPostFrameCallback((_) {
-      _scrollController.animateTo(
-        _scrollController.position.maxScrollExtent,
-        duration: const Duration(milliseconds: 300),
-        curve: Curves.easeOut,
-      );
-    });
-  }
+  final String coll;
+  final String chatId;
+  final String meId;
+  final Future<void> Function(Iterable<QueryDocumentSnapshot<Map<String, dynamic>>>) onBatchShown;
 
   @override
   Widget build(BuildContext context) {
-    return Scaffold(
-      appBar: AppBar(
-        elevation: 1,
-        title: Row(
-          children: [
-            CircleAvatar(
-              backgroundImage: _otherUser?.photoURL != null
-                  ? NetworkImage(_otherUser!.photoURL!)
-                  : (widget.otherUserAvatarUrl != null && widget.otherUserAvatarUrl!.isNotEmpty
-                  ? NetworkImage(widget.otherUserAvatarUrl!)
-                  : null),
-              child: _otherUser?.photoURL == null && (widget.otherUserAvatarUrl == null || widget.otherUserAvatarUrl!.isEmpty)
-                  ? const Icon(Icons.person)
-                  : null,
-            ),
-            const SizedBox(width: 12),
-            Expanded(
-              child: Text(
-                _otherUser?.displayName ?? widget.otherUserName,
-                overflow: TextOverflow.ellipsis,
-              ),
-            ),
-          ],
-        ),
-        actions: [
-          if (_otherUser != null)
-            IconButton(
-              icon: const Icon(Icons.call_outlined),
-              onPressed: _showContactInfoDialog,
-              tooltip: 'View Contact Info',
-            ),
-        ],
-      ),
-      body: StreamBuilder<DocumentSnapshot<Map<String, dynamic>>>(
-        stream: FirebaseFirestore.instance.collection('chats').doc(widget.chatChannelId).snapshots(),
-        builder: (context, channelSnapshot) {
-          if (!channelSnapshot.hasData || !channelSnapshot.data!.exists) {
-            return const Center(child: CircularProgressIndicator());
-          }
+    final q = FirebaseFirestore.instance
+        .collection(coll)
+        .doc(chatId)
+        .collection('messages')
+        .orderBy('timestamp', descending: true);
 
-          final data = channelSnapshot.data!.data();
-          final String? taskId = data != null && data.containsKey('taskId') ? data['taskId'] : null;
-
-          if (taskId == null) {
-            return Column(
-              children: [
-                Expanded(child: _buildChatMessages(null)),
-                if (_smartAction != null) _buildSmartActionButton(Theme.of(context)),
-                _MessageInputField(
-                  controller: _messageController,
-                  onSend: _sendMessage,
-                  onAttach: _showAttachmentMenu,
-                  isUploading: _isUploadingFile,
-                ),
-              ],
-            );
-          }
-
-          return StreamBuilder<DocumentSnapshot>(
-            stream: FirebaseFirestore.instance.collection('tasks').doc(taskId).snapshots(),
-            builder: (context, taskSnapshot) {
-              if (taskSnapshot.connectionState == ConnectionState.waiting) {
-                return const Center(child: CircularProgressIndicator());
-              }
-
-              final task = taskSnapshot.hasData && taskSnapshot.data!.exists
-                  ? Task.fromFirestore(taskSnapshot.data! as DocumentSnapshot<Map<String, dynamic>>)
-                  : null;
-
-              return Column(
-                children: [
-                  if (task != null) _buildNegotiationBar(context, task),
-                  Expanded(child: _buildChatMessages(task)),
-                  if (_smartAction != null) _buildSmartActionButton(Theme.of(context)),
-                  if (task != null && task.status == 'negotiating')
-                    _MessageInputField(
-                      controller: _messageController,
-                      onSend: _sendMessage,
-                      onAttach: _showAttachmentMenu,
-                      isUploading: _isUploadingFile,
-                    ),
-                ],
-              );
-            },
-          );
-        },
-      ),
-    );
-  }
-
-  Widget _buildChatMessages(Task? task) {
     return StreamBuilder<QuerySnapshot<Map<String, dynamic>>>(
-      stream: FirebaseFirestore.instance
-          .collection('chats')
-          .doc(widget.chatChannelId)
-          .collection('messages')
-          .orderBy('timestamp')
-          .snapshots(),
-      builder: (context, messageSnapshot) {
-        if (messageSnapshot.connectionState == ConnectionState.waiting) {
+      stream: q.limit(200).snapshots(),
+      builder: (context, snap) {
+        if (!snap.hasData) {
           return const Center(child: CircularProgressIndicator());
         }
-        if (!messageSnapshot.hasData || messageSnapshot.data!.docs.isEmpty) {
-          return const Center(
-              child: Text("Say hello!", style: TextStyle(color: Colors.grey)));
-        }
-        _scrollToBottom();
-        return ListView.builder(
-          controller: _scrollController,
-          padding: const EdgeInsets.all(12),
-          itemCount: messageSnapshot.data!.docs.length,
-          itemBuilder: (context, index) {
-            final messageDoc = messageSnapshot.data!.docs[index];
-            final message = ChatMessage.fromFirestore(messageDoc);
+        final docs = snap.data!.docs;
 
-            if (message.type == 'offer' && task != null) {
-              return _OfferMessageBubble(
-                key: ValueKey(message.id),
-                message: message,
-                task: task,
-                currentUserId: _currentUserId,
-                onCounterOffer: _showCounterOfferDialog,
-              );
-            }
-            return _MessageBubble(
-                key: ValueKey(message.id),
-                message: message,
-                isSentByMe: message.senderId == _currentUserId);
+        // mark read best-effort
+        WidgetsBinding.instance.addPostFrameCallback((_) => onBatchShown(docs));
+
+        if (docs.isEmpty) {
+          return const Center(child: Text('Say hi 👋'));
+        }
+
+        return ListView.builder(
+          controller: ScrollController(),
+          reverse: true,
+          padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 8),
+          itemCount: docs.length,
+          itemBuilder: (_, i) {
+            final m = docs[i].data();
+            final from = (m['senderId'] ?? '').toString();
+            final type = (m['type'] ?? 'text').toString();
+            final text = (m['text'] ?? '').toString();
+            final imageUrl = (m['imageUrl'] ?? '').toString();
+            final mine = from == meId;
+
+            // Respect "delete for me"
+            final deletedFor = (m['deletedFor'] is Map) ? (m['deletedFor'][meId] == true) : false;
+            if (deletedFor) return const SizedBox.shrink();
+
+            final bubble = type == 'image'
+                ? _ImageBubble(url: imageUrl, mine: mine)
+                : _TextBubble(text: text, mine: mine);
+
+            return GestureDetector(
+              onLongPress: () => _onLongPress(context, docs[i], m),
+              child: Align(
+                alignment: mine ? Alignment.centerRight : Alignment.centerLeft,
+                child: bubble,
+              ),
+            );
           },
         );
       },
     );
   }
 
-  Widget _buildNegotiationBar(BuildContext context, Task task) {
-    String statusText;
-    Color statusColor;
-    IconData statusIcon;
+  void _onLongPress(BuildContext context, QueryDocumentSnapshot<Map<String, dynamic>> doc, Map<String, dynamic> m) async {
+    final uid = meId;
+    final starred = (m['starredBy'] is Map) ? (m['starredBy'][uid] == true) : false;
+    final type = (m['type'] ?? 'text').toString();
+    final text = (m['text'] ?? '').toString();
 
-    switch (task.status) {
-      case 'negotiating':
-        statusText = 'Negotiation in progress for "${task.title}"';
-        statusColor = Colors.orange.shade700;
-        statusIcon = Icons.hourglass_bottom_rounded;
+    final action = await showModalBottomSheet<String>(
+      context: context,
+      showDragHandle: true,
+      builder: (_) => SafeArea(
+        child: Column(
+          mainAxisSize: MainAxisSize.min,
+          children: [
+            if (type == 'text' && text.isNotEmpty)
+              ListTile(
+                leading: const Icon(Icons.copy),
+                title: const Text('Copy text'),
+                onTap: () => Navigator.pop(context, 'copy'),
+              ),
+            ListTile(
+              leading: Icon(starred ? Icons.star : Icons.star_border),
+              title: Text(starred ? 'Unstar' : 'Star'),
+              onTap: () => Navigator.pop(context, 'star'),
+            ),
+            ListTile(
+              leading: const Icon(Icons.delete_outline, color: Colors.red),
+              title: const Text('Delete for me'),
+              onTap: () => Navigator.pop(context, 'delete_me'),
+            ),
+          ],
+        ),
+      ),
+    );
+
+    switch (action) {
+      case 'copy':
+        await Clipboard.setData(ClipboardData(text: text));
+        if (context.mounted) {
+          ScaffoldMessenger.of(context).showSnackBar(const SnackBar(content: Text('Copied')));
+        }
         break;
-      case 'assigned':
-        statusText =
-        'Task assigned! Final price: LKR ${NumberFormat("#,##0.00").format(task.finalAmount)}';
-        statusColor = Colors.green.shade700;
-        statusIcon = Icons.check_circle_outline_rounded;
+      case 'star':
+        try {
+          await doc.reference.set({'starredBy.$uid': starred ? FieldValue.delete() : true}, SetOptions(merge: true));
+        } catch (_) {}
+        break;
+      case 'delete_me':
+        try {
+          await doc.reference.set({'deletedFor.$uid': true}, SetOptions(merge: true));
+        } catch (_) {}
         break;
       default:
-        return const SizedBox.shrink();
+        break;
     }
-
-    return Container(
-      width: double.infinity,
-      padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 8),
-      color: statusColor.withOpacity(0.1),
-      child: Row(
-        children: [
-          Icon(statusIcon, color: statusColor, size: 20),
-          const SizedBox(width: 12),
-          Expanded(
-              child: Text(statusText,
-                  style: TextStyle(
-                      color: statusColor, fontWeight: FontWeight.bold))),
-        ],
-      ),
-    );
-  }
-
-  Widget _buildSmartActionButton(ThemeData theme) {
-    IconData icon = Icons.lightbulb_outline;
-    String text = _smartAction!['details'] ?? "Smart Action";
-    if (_smartAction!['action'] == 'schedule') icon = Icons.calendar_today_outlined;
-    if (_smartAction!['action'] == 'request_location') icon = Icons.location_on_outlined;
-
-    return Container(
-      width: double.infinity,
-      padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 4),
-      color: theme.primaryColor.withOpacity(0.1),
-      child: TextButton.icon(
-        style: TextButton.styleFrom(foregroundColor: theme.primaryColor, alignment: Alignment.centerLeft),
-        onPressed: _executeSmartAction,
-        icon: Icon(icon, size: 20),
-        label: Text(text, overflow: TextOverflow.ellipsis,),
-      ),
-    );
   }
 }
 
-// --- UI WIDGETS ---
-
-class _MessageBubble extends StatelessWidget {
-  final ChatMessage message;
-  final bool isSentByMe;
-
-  const _MessageBubble(
-      {Key? key, required this.message, required this.isSentByMe})
-      : super(key: key);
+class _TextBubble extends StatelessWidget {
+  const _TextBubble({required this.text, required this.mine});
+  final String text;
+  final bool mine;
 
   @override
   Widget build(BuildContext context) {
-    final theme = Theme.of(context);
-    final isImage = message.type == 'image';
-    return Align(
-      alignment: isSentByMe ? Alignment.centerRight : Alignment.centerLeft,
-      child: Container(
-        margin: const EdgeInsets.symmetric(vertical: 4, horizontal: 8),
-        padding: isImage
-            ? const EdgeInsets.all(4)
-            : const EdgeInsets.symmetric(vertical: 10, horizontal: 16),
-        decoration: BoxDecoration(
-          color: isSentByMe ? theme.primaryColor : Colors.grey[200],
-          borderRadius: BorderRadius.only(
-            topLeft: const Radius.circular(20),
-            topRight: const Radius.circular(20),
-            bottomLeft: Radius.circular(isSentByMe ? 20 : 4),
-            bottomRight: Radius.circular(isSentByMe ? 4 : 20),
-          ),
-        ),
-        child: isImage
-            ? ClipRRect(
-          borderRadius: BorderRadius.circular(16),
-          child: Image.network(
-            message.imageUrl!,
-            height: 200,
-            width: 200,
-            fit: BoxFit.cover,
-            loadingBuilder: (context, child, progress) =>
-            progress == null
-                ? child
-                : const SizedBox(
-                height: 200,
-                width: 200,
-                child: Center(child: CircularProgressIndicator())),
-          ),
-        )
-            : Text(message.text,
-            style:
-            TextStyle(color: isSentByMe ? Colors.white : Colors.black87)),
-      ),
-    );
-  }
-}
-
-class _OfferMessageBubble extends StatelessWidget {
-  final ChatMessage message;
-  final Task task;
-  final String currentUserId;
-  final VoidCallback onCounterOffer;
-
-  const _OfferMessageBubble({
-    Key? key,
-    required this.message,
-    required this.task,
-    required this.currentUserId,
-    required this.onCounterOffer,
-  }) : super(key: key);
-
-  @override
-  Widget build(BuildContext context) {
-    final FirestoreService firestoreService = FirestoreService();
-    final theme = Theme.of(context);
-
-    final bool isMyOffer = message.senderId == currentUserId;
-    final offerAmount = message.offerAmount ?? 0.0;
-
-    final bool isPending = message.offerStatus == 'pending';
-    final bool canTakeAction = isPending && !isMyOffer && task.status == 'negotiating';
-
-    String title;
-    Color cardColor;
-    Color borderColor;
-
-    if (isMyOffer) {
-      title = "You sent an offer:";
-      cardColor = Colors.blue.shade50;
-      borderColor = Colors.blue.shade200;
-    } else {
-      title = "You received an offer:";
-      cardColor = Colors.green.shade50;
-      borderColor = Colors.green.shade200;
-    }
-
-    if (!isPending) {
-      cardColor = Colors.grey.shade200;
-      borderColor = Colors.grey.shade300;
-    }
-
+    final cs = Theme.of(context).colorScheme;
     return Container(
-      margin: const EdgeInsets.symmetric(vertical: 8, horizontal: 8),
-      padding: const EdgeInsets.all(16),
+      margin: const EdgeInsets.symmetric(vertical: 4),
+      padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 8),
       decoration: BoxDecoration(
-        color: cardColor,
+        color: mine ? cs.primaryContainer : cs.surface,
         borderRadius: BorderRadius.circular(12),
-        border: Border.all(color: borderColor),
+        border: Border.all(color: cs.outline.withOpacity(0.12)),
       ),
-      child: Column(
-        crossAxisAlignment: CrossAxisAlignment.start,
-        children: [
-          Text(title, style: theme.textTheme.labelLarge?.copyWith(color: Colors.black87)),
-          const SizedBox(height: 8),
-          Text(
-            'LKR ${NumberFormat("#,##0.00").format(offerAmount)}',
-            style: theme.textTheme.headlineSmall?.copyWith(fontWeight: FontWeight.bold),
-          ),
-          if (message.text.isNotEmpty) ...[
-            const SizedBox(height: 4),
-            Text('"${message.text}"', style: theme.textTheme.bodyMedium?.copyWith(fontStyle: FontStyle.italic)),
-          ],
-          const Divider(height: 24),
+      child: Text(text),
+    );
+  }
+}
 
-          if (canTakeAction)
-            Row(
-              mainAxisAlignment: MainAxisAlignment.end,
-              children: [
-                OutlinedButton(
-                  onPressed: onCounterOffer,
-                  child: const Text("Counter-Offer"),
-                ),
-                const SizedBox(width: 8),
-                ElevatedButton(
-                  onPressed: () {
-                    if (message.offerId == null) {
-                      ScaffoldMessenger.of(context).showSnackBar(
-                        const SnackBar(content: Text("Cannot accept this offer: Missing Offer ID."), backgroundColor: Colors.red),
-                      );
-                      return;
-                    }
-                    firestoreService.acceptOffer(task.id, message.offerId!);
-                  },
-                  child: const Text("Accept Offer"),
-                ),
-              ],
-            )
-          else if (isPending && isMyOffer)
-            const Text("Waiting for a response...", style: TextStyle(fontStyle: FontStyle.italic, color: Colors.grey))
-          else
-            Text(
-              "Offer Status: ${message.offerStatus?.toUpperCase()}",
-              style: TextStyle(fontWeight: FontWeight.bold, color: Colors.grey.shade700),
-            )
-        ],
+class _ImageBubble extends StatelessWidget {
+  const _ImageBubble({required this.url, required this.mine});
+  final String url;
+  final bool mine;
+
+  @override
+  Widget build(BuildContext context) {
+    final cs = Theme.of(context).colorScheme;
+    return Container(
+      margin: const EdgeInsets.symmetric(vertical: 4),
+      padding: const EdgeInsets.all(4),
+      decoration: BoxDecoration(
+        color: mine ? cs.primaryContainer : cs.surface,
+        borderRadius: BorderRadius.circular(12),
+        border: Border.all(color: cs.outline.withOpacity(0.12)),
+      ),
+      child: ClipRRect(
+        borderRadius: BorderRadius.circular(8),
+        child: Image.network(url, width: 220, fit: BoxFit.cover),
       ),
     );
   }
 }
 
-class _MessageInputField extends StatelessWidget {
-  final TextEditingController controller;
-  final Function({String? imageUrl}) onSend;
-  final VoidCallback? onAttach;
-  final bool isUploading;
-
-  const _MessageInputField(
-      {Key? key,
-        required this.controller,
-        required this.onSend,
-        this.onAttach,
-        this.isUploading = false})
-      : super(key: key);
+class _QuickRepliesBar extends StatelessWidget {
+  const _QuickRepliesBar({required this.onPick, required this.onManage});
+  final void Function(String text) onPick;
+  final VoidCallback onManage;
 
   @override
   Widget build(BuildContext context) {
-    final theme = Theme.of(context);
-    return Material(
-      elevation: 8,
-      color: theme.cardColor,
-      child: Padding(
-        padding: EdgeInsets.only(
-            left: 8,
-            right: 8,
-            top: 8,
-            bottom: MediaQuery.of(context).padding.bottom + 8),
-        child: Row(
-          children: [
-            IconButton(
-              icon: isUploading
-                  ? const SizedBox(
-                  width: 24,
-                  height: 24,
-                  child: CircularProgressIndicator(strokeWidth: 2))
-                  : const Icon(Icons.add_circle_outline),
-              onPressed: onAttach,
-              tooltip: "Attach File",
-            ),
-            Expanded(
-              child: Container(
-                padding: const EdgeInsets.symmetric(horizontal: 16),
-                decoration: BoxDecoration(
-                    color: Colors.grey.shade100,
-                    borderRadius: BorderRadius.circular(24)),
-                child: TextField(
-                  controller: controller,
-                  decoration: const InputDecoration(
-                      hintText: 'Type a message...', border: InputBorder.none),
-                  textCapitalization: TextCapitalization.sentences,
-                  minLines: 1,
-                  maxLines: 5,
+    final cs = Theme.of(context).colorScheme;
+    return StreamBuilder<List<String>>(
+      stream: QuickRepliesService.streamReplies(),
+      builder: (context, snap) {
+        final replies = (snap.data ?? QuickRepliesService.defaultReplies).take(6).toList();
+        return Padding(
+          padding: const EdgeInsets.fromLTRB(12, 6, 12, 0),
+          child: Row(
+            children: [
+              Expanded(
+                child: SingleChildScrollView(
+                  scrollDirection: Axis.horizontal,
+                  child: Row(
+                    children: replies
+                        .map((t) => Padding(
+                      padding: const EdgeInsets.only(right: 8),
+                      child: ActionChip(
+                        label: Text(t, maxLines: 1, overflow: TextOverflow.ellipsis),
+                        onPressed: () => onPick(t),
+                        backgroundColor: cs.surface,
+                        side: BorderSide(color: cs.outline.withOpacity(0.12)),
+                      ),
+                    ))
+                        .toList(),
+                  ),
                 ),
               ),
+              IconButton(
+                tooltip: 'Manage quick replies',
+                icon: const Icon(Icons.edit_note_rounded),
+                onPressed: onManage,
+              ),
+            ],
+          ),
+        );
+      },
+    );
+  }
+}
+
+class _Composer extends StatelessWidget {
+  const _Composer({
+    required this.enabled,
+    required this.controller,
+    required this.onSend,
+    required this.onImage,
+  });
+
+  final bool enabled;
+  final TextEditingController controller;
+  final VoidCallback onSend;
+  final VoidCallback onImage;
+
+  @override
+  Widget build(BuildContext context) {
+    final cs = Theme.of(context).colorScheme;
+    return Container(
+      padding: const EdgeInsets.fromLTRB(12, 8, 12, 12),
+      decoration: BoxDecoration(
+        color: cs.surface,
+        border: Border(top: BorderSide(color: cs.outline.withOpacity(0.12))),
+      ),
+      child: Row(
+        children: [
+          IconButton(
+            tooltip: 'Add photo',
+            icon: const Icon(Icons.photo_library_outlined),
+            onPressed: enabled ? onImage : null,
+          ),
+          Expanded(
+            child: TextField(
+              enabled: enabled,
+              controller: controller,
+              minLines: 1,
+              maxLines: 4,
+              decoration: const InputDecoration(
+                hintText: 'Type a message…',
+                border: OutlineInputBorder(),
+                isDense: true,
+              ),
+              onSubmitted: (_) => onSend(),
             ),
-            IconButton(
-              icon: Icon(Icons.send_rounded, color: theme.primaryColor),
-              onPressed: () => onSend(),
-              tooltip: "Send",
-            ),
-          ],
-        ),
+          ),
+          const SizedBox(width: 8),
+          FilledButton.icon(
+            onPressed: enabled ? onSend : null,
+            icon: const Icon(Icons.send_rounded),
+            label: const Text('Send'),
+          ),
+        ],
       ),
     );
   }

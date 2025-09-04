@@ -1,139 +1,225 @@
-import 'package:flutter/material.dart';
+// lib/screens/notifications_screen.dart
 import 'package:cloud_firestore/cloud_firestore.dart';
 import 'package:firebase_auth/firebase_auth.dart';
-import 'package:intl/intl.dart';
-import 'package:servana/models/app_notification_model.dart';
-import 'package:servana/services/notification_service.dart';
-import 'package:servana/widgets/empty_state_widget.dart';
+import 'package:flutter/material.dart';
+
+import 'package:servana/screens/task_details_screen.dart';
+import 'package:servana/screens/conversation_screen.dart';
+import 'package:servana/screens/verification_center_screen.dart';
+import 'package:servana/screens/step_2_documents.dart' as step2;
 
 class NotificationsScreen extends StatefulWidget {
   const NotificationsScreen({super.key});
-
   @override
   State<NotificationsScreen> createState() => _NotificationsScreenState();
 }
 
 class _NotificationsScreenState extends State<NotificationsScreen> {
-  final _currentUser = FirebaseAuth.instance.currentUser;
-
-  Future<void> _markAllAsRead() async {
-    if (_currentUser == null) return;
-    final batch = FirebaseFirestore.instance.batch();
-    final notificationsSnapshot = await FirebaseFirestore.instance
-        .collection('users')
-        .doc(_currentUser!.uid)
-        .collection('notifications')
-        .where('isRead', isEqualTo: false)
-        .get();
-
-    for (var doc in notificationsSnapshot.docs) {
-      batch.update(doc.reference, {'isRead': true});
-    }
-    await batch.commit();
-  }
+  bool _markingAll = false;
 
   @override
   Widget build(BuildContext context) {
-    final theme = Theme.of(context);
-    if (_currentUser == null) {
-      return const Scaffold(body: Center(child: Text("Please log in to see notifications.")));
+    final uid = FirebaseAuth.instance.currentUser?.uid;
+    if (uid == null) {
+      return Scaffold(
+        appBar: AppBar(title: const Text('Alerts')),
+        body: const _Empty(message: 'Sign in to view alerts.'),
+      );
     }
+
+    final q = FirebaseFirestore.instance
+        .collection('users')
+        .doc(uid)
+        .collection('notifications')
+        .orderBy('timestamp', descending: true);
 
     return Scaffold(
       appBar: AppBar(
-        title: const Text('Notifications'),
+        title: const Text('Alerts'),
         actions: [
-          IconButton(
-            icon: const Icon(Icons.mark_chat_read_outlined),
-            tooltip: 'Mark all as read',
-            onPressed: _markAllAsRead,
-          ),
+          if (!_markingAll)
+            IconButton(
+              tooltip: 'Mark all read',
+              icon: const Icon(Icons.done_all_rounded),
+              onPressed: () async {
+                setState(() => _markingAll = true);
+                try {
+                  final batch = FirebaseFirestore.instance.batch();
+                  final qs = await q.limit(100).get();
+                  for (final d in qs.docs) {
+                    if ((d.data()['isRead'] ?? false) == false) {
+                      batch.set(d.reference, {'isRead': true}, SetOptions(merge: true));
+                    }
+                  }
+                  await batch.commit();
+                } catch (_) {
+                } finally {
+                  if (mounted) setState(() => _markingAll = false);
+                }
+              },
+            ),
         ],
       ),
       body: StreamBuilder<QuerySnapshot<Map<String, dynamic>>>(
-        stream: FirebaseFirestore.instance
-            .collection('users')
-            .doc(_currentUser!.uid)
-            .collection('notifications')
-            .orderBy('timestamp', descending: true)
-            .limit(50)
-            .snapshots(),
-        builder: (context, snapshot) {
-          if (snapshot.connectionState == ConnectionState.waiting) {
-            return const Center(child: CircularProgressIndicator());
+        stream: q.snapshots(),
+        builder: (context, snap) {
+          if (!snap.hasData) {
+            return const Center(child: CircularProgressIndicator(strokeWidth: 2));
           }
-          if (snapshot.hasError || !snapshot.hasData || snapshot.data!.docs.isEmpty) {
-            return const EmptyStateWidget(
-              icon: Icons.notifications_off_outlined,
-              title: 'All Caught Up!',
-              message: 'Important updates and messages will appear here.',
-            );
+          final docs = snap.data!.docs;
+          if (docs.isEmpty) {
+            return const _Empty(message: 'No alerts yet.');
           }
-          final notifications = snapshot.data!.docs
-              .map((doc) => AppNotification.fromFirestore(doc))
-              .toList();
 
           return ListView.separated(
-            itemCount: notifications.length,
-            separatorBuilder: (context, index) => const Divider(height: 1),
-            itemBuilder: (context, index) {
-              final notification = notifications[index];
-              return NotificationTile(notification: notification);
+            padding: const EdgeInsets.fromLTRB(12, 8, 12, 16),
+            itemCount: docs.length,
+            separatorBuilder: (_, __) => const SizedBox(height: 8),
+            itemBuilder: (context, i) {
+              final d = docs[i].data();
+              final id = docs[i].id;
+              final isRead = (d['isRead'] ?? false) == true;
+              final title = (d['title'] ?? 'Notification').toString();
+              final body  = (d['body']  ?? '').toString();
+              dynamic ts = d['timestamp'];
+              String timeAgo = '';
+              if (ts is Timestamp) timeAgo = _timeAgo(ts.toDate());
+
+              return Dismissible(
+                key: ValueKey(id),
+                direction: DismissDirection.endToStart,
+                background: _SwipeBg(
+                  label: isRead ? 'Mark unread' : 'Mark read',
+                  icon: isRead ? Icons.markunread_rounded : Icons.done_all_rounded,
+                ),
+                confirmDismiss: (_) async {
+                  try {
+                    await FirebaseFirestore.instance
+                        .collection('users')
+                        .doc(uid)
+                        .collection('notifications')
+                        .doc(id)
+                        .set({'isRead': !isRead}, SetOptions(merge: true));
+                  } catch (_) {}
+                  return false;
+                },
+                child: ListTile(
+                  tileColor: isRead
+                      ? null
+                      : Theme.of(context).colorScheme.primary.withOpacity(0.06),
+                  shape: RoundedRectangleBorder(
+                    borderRadius: BorderRadius.circular(12),
+                    side: BorderSide(
+                      color: Theme.of(context).colorScheme.outline.withOpacity(0.12),
+                    ),
+                  ),
+                  title: Text(title, maxLines: 1, overflow: TextOverflow.ellipsis),
+                  subtitle: Text(body, maxLines: 2, overflow: TextOverflow.ellipsis),
+                  trailing: Text(timeAgo, style: Theme.of(context).textTheme.labelSmall),
+                  onTap: () => _openRelated(context, d),
+                ),
+              );
             },
           );
         },
       ),
     );
   }
+
+  void _openRelated(BuildContext context, Map<String, dynamic> d) {
+    final type = (d['type'] as String?)?.toLowerCase() ?? '';
+    final relatedId = (d['relatedId'] as String?) ?? '';
+
+    switch (type) {
+      case 'chat':
+        if (relatedId.isNotEmpty) {
+          Navigator.push(context, MaterialPageRoute(
+            builder: (_) => ConversationScreen(channelId: relatedId),
+          ));
+        }
+        break;
+
+      case 'task':
+      case 'task_details':
+      case 'task_offer':
+        if (relatedId.isNotEmpty) {
+          Navigator.push(context, MaterialPageRoute(
+            builder: (_) => TaskDetailsScreen(taskId: relatedId),
+          ));
+        }
+        break;
+
+      case 'verification_update':
+      case 'verification_approved':
+      case 'verification_rejected':
+        if (relatedId.isNotEmpty) {
+          Navigator.push(context, MaterialPageRoute(
+            builder: (_) => step2.Step2Documents(initialCategoryId: relatedId),
+          ));
+        } else {
+          Navigator.push(context, MaterialPageRoute(
+            builder: (_) => const VerificationCenterScreen(),
+          ));
+        }
+        break;
+
+      default:
+        break;
+    }
+  }
 }
 
-class NotificationTile extends StatelessWidget {
-  final AppNotification notification;
-  const NotificationTile({super.key, required this.notification});
-
-  Future<void> _handleTap() async {
-    // Mark as read in Firestore
-    if (!notification.isRead) {
-      final userId = FirebaseAuth.instance.currentUser?.uid;
-      if (userId != null) {
-        FirebaseFirestore.instance
-            .collection('users').doc(userId)
-            .collection('notifications').doc(notification.id)
-            .update({'isRead': true});
-      }
-    }
-    // Use the centralized navigation service
-    NotificationService().handleNotificationClick({
-      'type': notification.type,
-      'relatedId': notification.relatedId
-    });
-  }
+class _SwipeBg extends StatelessWidget {
+  const _SwipeBg({required this.label, required this.icon});
+  final String label;
+  final IconData icon;
 
   @override
   Widget build(BuildContext context) {
-    final theme = Theme.of(context);
-    return Material(
-      color: notification.isRead ? theme.canvasColor : theme.colorScheme.primaryContainer.withOpacity(0.3),
-      child: ListTile(
-        leading: CircleAvatar(child: Icon(_getIconForType(notification.type))),
-        title: Text(notification.title, style: TextStyle(fontWeight: notification.isRead ? FontWeight.normal : FontWeight.bold)),
-        subtitle: Text(notification.body),
-        trailing: Text(DateFormat.yMd().add_jm().format(notification.timestamp.toDate()), style: theme.textTheme.labelSmall),
-        onTap: _handleTap,
+    final cs = Theme.of(context).colorScheme;
+    return Container(
+      alignment: Alignment.centerRight,
+      padding: const EdgeInsets.symmetric(horizontal: 16),
+      color: cs.primaryContainer,
+      child: Row(
+        mainAxisAlignment: MainAxisAlignment.end,
+        children: [
+          Text(label, style: Theme.of(context).textTheme.labelLarge?.copyWith(color: cs.primary)),
+          const SizedBox(width: 8),
+          Icon(icon, color: cs.primary),
+        ],
       ),
     );
   }
+}
 
-  IconData _getIconForType(String type) {
-    switch (type) {
-      case 'task_offer': return Icons.local_offer;
-      case 'task_assigned': return Icons.assignment_turned_in;
-      case 'task_finished': return Icons.check_circle;
-      case 'new_badge': return Icons.emoji_events;
-      case 'verification_approved': return Icons.verified_user;
-      case 'verification_rejected': return Icons.gpp_bad;
-      case 'chat': return Icons.message;
-      default: return Icons.notifications;
-    }
+class _Empty extends StatelessWidget {
+  const _Empty({required this.message});
+  final String message;
+
+  @override
+  Widget build(BuildContext context) {
+    final cs = Theme.of(context).colorScheme;
+    return Center(
+      child: Padding(
+        padding: const EdgeInsets.all(24),
+        child: Column(
+          mainAxisSize: MainAxisSize.min,
+          children: [
+            Icon(Icons.inbox_outlined, size: 44, color: cs.outline),
+            const SizedBox(height: 10),
+            Text(message),
+          ],
+        ),
+      ),
+    );
   }
+}
+
+String _timeAgo(DateTime t) {
+  final d = DateTime.now().difference(t);
+  if (d.inMinutes < 1) return 'now';
+  if (d.inMinutes < 60) return '${d.inMinutes}m';
+  if (d.inHours < 24) return '${d.inHours}h';
+  return '${d.inDays}d';
 }

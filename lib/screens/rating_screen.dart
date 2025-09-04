@@ -1,165 +1,265 @@
-import 'package:flutter/material.dart';
+// lib/screens/rating_screen.dart
+//
+// Leave a Review (both roles)
+// • Called after a task is completed (or from a profile “Write a review” CTA)
+// • Collects: star rating (0.5–5.0), short comment (optional), anonymity toggle
+// • Writes to: reviews/{autoId}  and softly updates the target user’s rating counters
+// • If taskId provided → also writes tasks/{taskId}.reviewedBy{Poster|Helper}=true
+//
+// Firestore schemas used (guarded):
+//   reviews/{id} {
+//     taskId?: string,
+//     reviewerId: uid,
+//     revieweeId: uid,
+//     role: 'poster'|'helper',        // reviewee role
+//     rating: number (0.5..5),
+//     comment?: string,
+//     anonymous?: bool,
+//     createdAt: Timestamp
+//   }
+//
+//   users/{revieweeId} aggregates (soft, non-authoritative; backend should reconcile):
+//     averageRating: number
+//     ratingCount: number
+//
+// Notes:
+// • We use a transaction to apply a running average. In a high-write environment,
+//   move aggregation to Cloud Functions. This is a safe, client-friendly fallback.
+
+import 'package:cloud_firestore/cloud_firestore.dart';
 import 'package:firebase_auth/firebase_auth.dart';
-import 'package:servana/models/task_model.dart';
-import 'package:servana/services/firestore_service.dart';
+import 'package:flutter/material.dart';
 
 class RatingScreen extends StatefulWidget {
-  final Task task;
-  final String personToRateId;
-  final String personToRateName;
-  final String? personToRateAvatarUrl;
-
   const RatingScreen({
-    Key? key,
-    required this.task,
-    required this.personToRateId,
-    required this.personToRateName,
-    this.personToRateAvatarUrl,
-  }) : super(key: key);
+    super.key,
+    required this.revieweeId,
+    this.taskId,
+    this.revieweeRole = 'helper', // 'helper' | 'poster'
+  });
+
+  final String revieweeId;
+  final String? taskId;
+  final String revieweeRole;
+
+  // New factory for easily creating a helper review screen
+  factory RatingScreen.helper({Key? key, required String helperId, String? taskId}) {
+    return RatingScreen(key: key, revieweeId: helperId, revieweeRole: 'helper', taskId: taskId);
+  }
 
   @override
   State<RatingScreen> createState() => _RatingScreenState();
 }
 
 class _RatingScreenState extends State<RatingScreen> {
-  final FirestoreService _firestoreService = FirestoreService();
-  double _rating = 0.0;
-  final _reviewController = TextEditingController();
-  bool _isLoading = false;
-
-  /// Submits the review by calling the centralized service function.
-  Future<void> _submitReview() async {
-    if (_rating == 0.0) {
-      ScaffoldMessenger.of(context).showSnackBar(
-        const SnackBar(content: Text('Please select a star rating.'), backgroundColor: Colors.orange),
-      );
-      return;
-    }
-
-    final currentUser = FirebaseAuth.instance.currentUser;
-    if (currentUser == null) return;
-
-    setState(() => _isLoading = true);
-
-    try {
-      await _firestoreService.submitReviewAndCloseTask(
-        task: widget.task,
-        ratedUserId: widget.personToRateId,
-        reviewerId: currentUser.uid,
-        reviewerName: currentUser.displayName ?? 'Anonymous',
-        reviewerAvatarUrl: currentUser.photoURL,
-        rating: _rating,
-        reviewText: _reviewController.text.trim(),
-      );
-
-      if (mounted) {
-        // Pop back to the root screen (e.g., home screen) after successful rating
-        Navigator.of(context).popUntil((route) => route.isFirst);
-        ScaffoldMessenger.of(context).showSnackBar(
-          const SnackBar(content: Text('Thank you for your feedback!'), backgroundColor: Colors.green),
-        );
-      }
-
-    } catch (e) {
-      if (mounted) {
-        ScaffoldMessenger.of(context).showSnackBar(
-          SnackBar(content: Text('Failed to submit review: ${e.toString()}'), backgroundColor: Colors.red),
-        );
-      }
-    } finally {
-      if (mounted) {
-        setState(() => _isLoading = false);
-      }
-    }
-  }
+  double _rating = 5.0;
+  final TextEditingController _commentCtrl = TextEditingController();
+  bool _anonymous = false;
+  bool _busy = false;
 
   @override
   void dispose() {
-    _reviewController.dispose();
+    _commentCtrl.dispose();
     super.dispose();
+  }
+
+  Future<void> _submit() async {
+    final me = FirebaseAuth.instance.currentUser;
+    if (me == null) {
+      _toast('Please sign in first.', error: true);
+      return;
+    }
+    if (_rating <= 0) {
+      _toast('Please choose a rating.');
+      return;
+    }
+
+    setState(() => _busy = true);
+
+    try {
+      final now = FieldValue.serverTimestamp();
+
+      // 1) Create the review document
+      final revRef = FirebaseFirestore.instance.collection('reviews').doc();
+      await revRef.set({
+        'taskId': widget.taskId,
+        'reviewerId': me.uid,
+        'revieweeId': widget.revieweeId,
+        'role': widget.revieweeRole, // reviewee role
+        'rating': _rating,
+        'comment': _commentCtrl.text.trim().isEmpty ? null : _commentCtrl.text.trim(),
+        'anonymous': _anonymous,
+        'createdAt': now,
+      });
+
+      // 2) Soft aggregate on reviewee user doc using a transaction
+      final userRef = FirebaseFirestore.instance.collection('users').doc(widget.revieweeId);
+      await FirebaseFirestore.instance.runTransaction((trx) async {
+        final snap = await trx.get(userRef);
+        final m = (snap.data() ?? <String, dynamic>{});
+        final prevCount = (m['ratingCount'] is num) ? (m['ratingCount'] as num).toInt() : 0;
+        final prevAvg = (m['averageRating'] is num) ? (m['averageRating'] as num).toDouble() : 0.0;
+
+        final nextCount = prevCount + 1;
+        final nextAvg = ((prevAvg * prevCount) + _rating) / (nextCount == 0 ? 1 : nextCount);
+
+        trx.set(userRef, {
+          'ratingCount': nextCount,
+          'averageRating': double.parse(nextAvg.toStringAsFixed(2)),
+          'updatedAt': now,
+        }, SetOptions(merge: true));
+      });
+
+      // 3) Mark task as reviewed (optional)
+      if (widget.taskId != null && widget.taskId!.isNotEmpty) {
+        final taskRef = FirebaseFirestore.instance.collection('tasks').doc(widget.taskId);
+        await taskRef.set({
+          widget.revieweeRole == 'helper' ? 'reviewedByPoster' : 'reviewedByHelper': true,
+          'updatedAt': now,
+        }, SetOptions(merge: true));
+      }
+
+      if (!mounted) return;
+      _toast('Thanks for your feedback!');
+      Navigator.pop(context, true);
+    } catch (e) {
+      if (!mounted) return;
+      _toast('Could not submit review: $e', error: true);
+    } finally {
+      if (mounted) setState(() => _busy = false);
+    }
+  }
+
+  void _toast(String msg, {bool error = false}) {
+    ScaffoldMessenger.of(context)
+        .showSnackBar(SnackBar(content: Text(msg), backgroundColor: error ? Colors.red : null));
   }
 
   @override
   Widget build(BuildContext context) {
-    final theme = Theme.of(context);
+    final cs = Theme.of(context).colorScheme;
+
     return Scaffold(
       appBar: AppBar(
-        title: const Text('Rate Your Experience'),
+        title: const Text('Leave a review'),
+        centerTitle: true,
       ),
-      body: Center(
-        child: SingleChildScrollView(
-          padding: const EdgeInsets.all(24.0),
-          child: Column(
-            mainAxisAlignment: MainAxisAlignment.center,
-            children: [
-              CircleAvatar(
-                radius: 45,
-                backgroundImage: widget.personToRateAvatarUrl != null && widget.personToRateAvatarUrl!.isNotEmpty
-                    ? NetworkImage(widget.personToRateAvatarUrl!)
-                    : null,
-                child: (widget.personToRateAvatarUrl == null || widget.personToRateAvatarUrl!.isEmpty)
-                    ? const Icon(Icons.person, size: 45)
-                    : null,
+      body: ListView(
+        padding: const EdgeInsets.fromLTRB(16, 12, 16, 120),
+        children: [
+          // Header
+          Card(
+            child: ListTile(
+              leading: CircleAvatar(
+                backgroundColor: cs.primary.withOpacity(0.12),
+                foregroundColor: cs.primary,
+                child: const Icon(Icons.rate_review_outlined),
               ),
-              const SizedBox(height: 16),
-              Text(
-                'How was your experience with ${widget.personToRateName}?',
-                textAlign: TextAlign.center,
-                style: theme.textTheme.headlineSmall?.copyWith(fontWeight: FontWeight.bold),
-              ),
-              const SizedBox(height: 8),
-              Text(
-                'Your feedback helps build a trusted community.',
-                textAlign: TextAlign.center,
-                style: theme.textTheme.bodyLarge?.copyWith(color: theme.colorScheme.onSurfaceVariant),
-              ),
-              const SizedBox(height: 32),
-              _buildStarRating(),
-              const SizedBox(height: 32),
-              TextField(
-                controller: _reviewController,
-                maxLines: 4,
-                decoration: InputDecoration(
-                  hintText: 'Share more details... (optional)',
-                  border: OutlineInputBorder(borderRadius: BorderRadius.circular(12)),
+              title: Text('Review the ${widget.revieweeRole == 'helper' ? 'helper' : 'poster'}'),
+              subtitle: Text('User: ${widget.revieweeId.substring(0, 6)}…'),
+            ),
+          ),
+          const SizedBox(height: 12),
+
+          // Stars
+          _Stars(
+            value: _rating,
+            onChanged: (v) => setState(() => _rating = v),
+          ),
+          const SizedBox(height: 12),
+
+          // Comment
+          Card(
+            child: Padding(
+              padding: const EdgeInsets.fromLTRB(16, 14, 16, 14),
+              child: TextField(
+                controller: _commentCtrl,
+                minLines: 3,
+                maxLines: 6,
+                decoration: const InputDecoration(
+                  labelText: 'Comment (optional)',
+                  hintText: 'What went well? Anything to improve?',
                 ),
               ),
-              const SizedBox(height: 32),
-              SizedBox(
-                width: double.infinity,
-                child: ElevatedButton(
-                  onPressed: _isLoading ? null : _submitReview,
-                  style: ElevatedButton.styleFrom(padding: const EdgeInsets.symmetric(vertical: 16)),
-                  child: _isLoading
-                      ? const SizedBox(height: 24, width: 24, child: CircularProgressIndicator(color: Colors.white))
-                      : const Text('Submit Review & Complete Task'),
-                ),
-              ),
-            ],
+            ),
+          ),
+
+          // Anonymous toggle
+          SwitchListTile(
+            value: _anonymous,
+            onChanged: (v) => setState(() => _anonymous = v),
+            title: const Text('Post anonymously'),
+            subtitle: const Text('Your name won’t be shown with this review.'),
+            secondary: const Icon(Icons.visibility_off_outlined),
+          ),
+
+          // Info
+          Card(
+            color: cs.surfaceContainerHigh,
+            child: const ListTile(
+              leading: Icon(Icons.info_outline),
+              title: Text('Be honest and respectful.'),
+              subtitle: Text('Reviews help everyone make better decisions.'),
+            ),
+          ),
+        ],
+      ),
+
+      // Submit bar
+      bottomNavigationBar: SafeArea(
+        top: false,
+        child: Padding(
+          padding: const EdgeInsets.fromLTRB(16, 8, 16, 16),
+          child: FilledButton.icon(
+            onPressed: _busy ? null : _submit,
+            icon: _busy
+                ? const SizedBox(width: 16, height: 16, child: CircularProgressIndicator(strokeWidth: 2))
+                : const Icon(Icons.send_outlined),
+            label: const Text('Submit review'),
           ),
         ),
       ),
     );
   }
+}
 
-  Widget _buildStarRating() {
-    return Row(
-      mainAxisAlignment: MainAxisAlignment.center,
-      children: List.generate(5, (index) {
-        return IconButton(
-          iconSize: 40,
-          splashRadius: 40,
-          icon: Icon(
-            index < _rating ? Icons.star_rounded : Icons.star_border_rounded,
-            color: Colors.amber,
-          ),
-          onPressed: () {
-            setState(() {
-              _rating = index + 1.0;
-            });
-          },
-        );
-      }),
+// ---------------- Stars widget ----------------
+
+class _Stars extends StatelessWidget {
+  const _Stars({required this.value, required this.onChanged});
+
+  final double value;
+  final ValueChanged<double> onChanged;
+
+  @override
+  Widget build(BuildContext context) {
+    // 10 tappable segments (0.5 steps)
+    return Card(
+      child: Padding(
+        padding: const EdgeInsets.fromLTRB(16, 18, 16, 12),
+        child: Column(
+          crossAxisAlignment: CrossAxisAlignment.start,
+          children: [
+            Text('Rating: ${value.toStringAsFixed(1)}', style: Theme.of(context).textTheme.titleMedium),
+            const SizedBox(height: 10),
+            Wrap(
+              spacing: 6,
+              children: List.generate(10, (i) {
+                final step = (i + 1) * 0.5;
+                final filled = value >= step;
+                return InkWell(
+                  onTap: () => onChanged(step),
+                  child: Icon(
+                    filled ? Icons.star_rounded : Icons.star_border_rounded,
+                    color: filled ? Colors.amber : Colors.grey,
+                    size: 28,
+                  ),
+                );
+              }),
+            ),
+          ],
+        ),
+      ),
     );
   }
 }

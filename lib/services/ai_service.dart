@@ -1,127 +1,239 @@
-import 'dart:convert';
-import 'package:flutter/foundation.dart';
-import 'package:flutter_dotenv/flutter_dotenv.dart';
-import 'package:google_generative_ai/google_generative_ai.dart';
-import 'package:servana/constants/service_categories.dart'; // Import service categories to use in the prompt
+import 'dart:math' as math;
+import 'package:flutter/material.dart';
 
-/// A service class for interacting with the Google Gemini AI for various features.
+/// Lightweight, offline-first helpers used by UI for:
+///  • Smart chat actions in Conversation screen
+///  • Heuristic drafting for Post Task
+///  • Icon mapping for categories
+///  • Price band heuristics (and record getters .min/.max)
+///
+/// This file intentionally has ZERO network calls so it’s always safe to use.
+/// If you later wire a backend (e.g., Cloud Functions / Gemini), you can
+/// replace the heuristics while keeping the same method signatures.
 class AiService {
-  static final String? _apiKey = dotenv.env['GEMINI_API_KEY'];
+  AiService._();
 
-  /// --- NEW: AI-Powered Search Query Parser ---
-  /// Analyzes a natural language search query and converts it into a structured filter map.
-  static Future<Map<String, dynamic>?> parseSearchQuery(String query) async {
-    if (_apiKey == null || _apiKey!.isEmpty) {
-      debugPrint("GEMINI_API_KEY not found.");
-      return null; // Return null if no API key
+  /// Suggests a contextual action in chat based on the latest user text.
+  /// Returns a small payload like:
+  ///   {"type":"share_contact"}
+  ///   {"type":"propose_meet", "when":"today 5pm"}
+  ///   {"type":"send_quote", "amount": 3500}
+  /// or `null` if no suggestion.
+  static Future<Map<String, dynamic>?> getSmartChatAction(String text) async {
+    final t = (text).toLowerCase().trim();
+
+    if (t.isEmpty) return null;
+
+    // Contact exchange
+    if (t.contains('phone') ||
+        t.contains('whats') ||
+        t.contains('contact') ||
+        t.contains('number') ||
+        t.contains('call me') ||
+        t.contains('reach me')) {
+      return {"type": "share_contact"};
     }
-    final model = GenerativeModel(model: 'gemini-1.5-flash', apiKey: _apiKey!);
 
-    // Create a string of all available categories to help the AI.
-    final allCategories = AppServices.categories.keys.join(', ');
-
-    // This detailed prompt instructs the AI on how to behave.
-    final prompt = '''
-      Analyze the user's search query: "$query".
-      Your task is to extract specific filters and return them as a JSON object.
-      The possible filters are:
-      1. "category": A string that must be one of these exact values: [$allCategories].
-      2. "searchTerm": A string containing the main subject of the search (e.g., "plumber", "leaky pipe").
-      3. "isVerified": A boolean (true if the user asks for "verified", "trusted", or "pro" helpers).
-      4. "minRating": A number between 1 and 5 (e.g., if the user asks for "good rating" or "4 stars and up").
-
-      - If a filter is not mentioned in the query, do not include its key in the JSON.
-      - Prioritize matching the category from the provided list.
-      - The "searchTerm" should be a concise keyword.
-
-      Examples:
-      - Query: "show me verified plumbers with good ratings" -> {"category": "Home & Garden", "searchTerm": "plumber", "isVerified": true, "minRating": 4}
-      - Query: "car wash" -> {"category": "Automotive Services", "searchTerm": "car wash"}
-      - Query: "maths tutor for my son" -> {"category": "Lessons & Tutoring", "searchTerm": "maths tutor"}
-    ''';
-
-    try {
-      final response = await model.generateContent([Content.text(prompt)]);
-      final text = response.text?.replaceAll('```json', '').replaceAll('```', '').trim();
-      if (text == null || text.isEmpty) return null;
-
-      // Return the parsed JSON object which will be our filter map.
-      return jsonDecode(text) as Map<String, dynamic>;
-    } catch (e) {
-      debugPrint("Error parsing search query with AI: $e");
-      // If AI fails, we can return a simple keyword search as a fallback.
-      return {'searchTerm': query};
+    // Scheduling
+    if (t.contains('tomorrow') ||
+        t.contains('today') ||
+        t.contains('morning') ||
+        t.contains('evening') ||
+        t.contains('meet') ||
+        t.contains('when') ||
+        t.contains('what time')) {
+      return {"type": "propose_meet"};
     }
-  }
 
-  /// Generates a task description, category, and budget from a simple title.
-  static Future<Map<String, dynamic>?> getTaskSuggestionsFromTitle(String title) async {
-    if (_apiKey == null || _apiKey!.isEmpty) {
-      debugPrint("GEMINI_API_KEY not found.");
-      return null;
-    }
-    final model = GenerativeModel(model: 'gemini-1.5-flash', apiKey: _apiKey!);
-    final prompt = 'Analyze the task title: "$title". Based on this, generate a JSON object with: 1) a "description" template prompting the user for details (using markdown bolding for headers), 2) a suggested "category" from ["Home & Garden", "Digital & Online", "Education", "Other"], and 3) a suggested "budget" as an integer in LKR. Example Response: {"description": "**Type of Work:** [e.g., Repair, Installation]", "category": "Home & Garden", "budget": 3500}';
-
-    try {
-      final response = await model.generateContent([Content.text(prompt)]);
-      final text = response.text?.replaceAll('```json', '').replaceAll('```', '').trim();
-      if (text == null || text.isEmpty) return null;
-      return jsonDecode(text) as Map<String, dynamic>;
-    } catch (e) {
-      debugPrint("Error getting task suggestions with AI: $e");
-      return null;
-    }
-  }
-
-  /// Generates a full task from a user's text input and an image.
-  static Future<Map<String, String>?> generateTaskFromImage(String userInput, Uint8List imageData) async {
-    if (_apiKey == null || _apiKey!.isEmpty) {
-      debugPrint("GEMINI_API_KEY not found.");
-      return null;
-    }
-    final model = GenerativeModel(model: 'gemini-1.5-flash', apiKey: _apiKey!);
-    final imagePart = DataPart('image/jpeg', imageData);
-    final prompt = TextPart('Analyze the image and the user text: "$userInput". Generate a JSON object with a "title", a detailed "description", a suggested "category" from ["Home & Garden", "Digital & Online", "Education", "Other"], and a suggested "budget" in LKR. For example: {"title": "Repair Leaky Kitchen Sink", "description": "**Location of Leak:** Under the sink...\\n**Severity:** Dripping consistently...", "category": "Home & Garden", "budget": "3000"}');
-
-    try {
-      final response = await model.generateContent([Content.multi([prompt, imagePart])]);
-      final text = response.text?.replaceAll('```json', '').replaceAll('```', '').trim();
-      if (text == null || text.isEmpty) return null;
-      return Map<String, String>.from(jsonDecode(text));
-    } catch (e) {
-      debugPrint("Error generating task from image with AI: $e");
-      return null;
-    }
-  }
-
-  /// Analyzes a chat message to suggest a contextual "smart action".
-  static Future<Map<String, dynamic>?> getSmartChatAction(String message) async {
-    if (_apiKey == null || _apiKey!.isEmpty) {
-      final lowerCaseText = message.toLowerCase();
-      if (lowerCaseText.contains('meet') || lowerCaseText.contains('schedule') || lowerCaseText.contains('tomorrow')) {
-        return {'action': 'schedule', 'details': 'Schedule a meeting for tomorrow?'};
+    // Quoting
+    if (t.contains('price') ||
+        t.contains('quote') ||
+        t.contains('budget') ||
+        t.contains('how much')) {
+      // Try to sniff an amount in the message
+      final amount = _extractFirstNumber(t);
+      if (amount != null) {
+        return {"type": "send_quote", "amount": amount};
       }
-      if (lowerCaseText.contains('where are you') || lowerCaseText.contains('location')) {
-        return {'action': 'request_location', 'details': 'Request user\'s location?'};
-      }
-      return null;
+      return {"type": "send_quote"};
     }
 
-    final model = GenerativeModel(model: 'gemini-1.5-flash', apiKey: _apiKey!);
-    final prompt = 'Analyze the following chat message: "$message". Determine if it implies a specific user intent. If it suggests scheduling, return a JSON object like {"action": "schedule", "details": "Schedule a meeting?"}. If it asks for a location, return {"action": "request_location", "details": "Request location?"}. If no clear action is found, return null.';
+    // Location sharing
+    if (t.contains('where') || t.contains('location') || t.contains('address')) {
+      return {"type": "share_location"};
+    }
 
-    try {
-      final response = await model.generateContent([Content.text(prompt)]);
-      final text = response.text?.replaceAll('```json', '').replaceAll('```', '').trim();
+    return null;
+  }
 
-      if (text == null || text.isEmpty || text.toLowerCase() == 'null') {
-        return null;
-      }
-      return jsonDecode(text) as Map<String, dynamic>;
-    } catch (e) {
-      debugPrint("Error getting smart chat action with AI: $e");
-      return getSmartChatAction(message);
+  /// Drafts a task from loose text. Use when user taps "✨ Generate for me".
+  /// Returns a tolerant map with any of: title, category, tags, budgetRange.
+  static Future<Map<String, dynamic>> draftTaskFromText({
+    String? title,
+    String? description,
+  }) async {
+    final text = '${title ?? ''} ${description ?? ''}'.toLowerCase();
+
+    final category = AppServices.guessCategory(text);
+    final tags = AppServices.extractTags(text);
+    final band = estimateBudgetBand(category: category, text: text);
+
+    final draft = <String, dynamic>{};
+    draft['title'] = _titleFrom(text) ?? (category != null ? 'Need $category' : 'New task');
+    if (category != null) draft['category'] = category;
+    if (tags.isNotEmpty) draft['tags'] = tags;
+    if (band != null) {
+      draft['budgetRange'] = {"min": band.min, "max": band.max};
+    }
+    return draft;
+  }
+
+  /// Very small heuristic for price band; returns a positional record (min,max).
+  /// Use `.min` / `.max` thanks to [PriceBandRecordExt] below.
+  static (int, int)? estimateBudgetBand({
+    String? category,
+    String? text,
+  }) {
+    final c = (category ?? AppServices.guessCategory(text ?? '') ?? '').toLowerCase();
+    if (c.isEmpty) return null;
+
+    // Extremely rough bands in LKR. Tune later if needed.
+    switch (c) {
+      case 'plumbing':
+      case 'electrician':
+        return (2500, 7500);
+      case 'cleaning':
+        return (1500, 4500);
+      case 'moving':
+      case 'delivery':
+        return (3000, 12000);
+      case 'painting':
+        return (8000, 30000);
+      case 'carpentry':
+        return (5000, 20000);
+      case 'gardening':
+        return (2000, 6000);
+      case 'ac repair':
+      case 'appliance repair':
+        return (4000, 15000);
+      case 'graphic design':
+      case 'design':
+        return (5000, 20000);
+      case 'it support':
+      case 'computer repair':
+        return (4000, 12000);
+      case 'tuition':
+      case 'teaching':
+        return (2000, 6000);
+      default:
+        return (2000, 10000);
     }
   }
+
+  // ---- private helpers ------------------------------------------------------
+
+  static int? _extractFirstNumber(String s) {
+    final m = RegExp(r'(\d[\d,\.]*)').firstMatch(s);
+    if (m == null) return null;
+    final raw = m.group(1)!;
+    final cleaned = raw.replaceAll(',', '');
+    final v = int.tryParse(cleaned.split('.').first);
+    return v;
+  }
+
+  static String? _titleFrom(String s) {
+    final t = s.trim();
+    if (t.isEmpty) return null;
+
+    // Try to grab a succinct title-like phrase.
+    final candidates = <String>[
+      for (final part in t.split(RegExp(r'[\.!\n]'))) part.trim()
+    ]..removeWhere((e) => e.isEmpty);
+
+    if (candidates.isEmpty) return null;
+
+    // Pick shortest meaningful piece (but not too short)
+    candidates.sort((a, b) => a.length.compareTo(b.length));
+    final chosen = candidates.firstWhere(
+          (e) => e.length >= 8,
+      orElse: () => candidates.first,
+    );
+
+    // Capitalize first letter
+    return chosen[0].toUpperCase() + chosen.substring(1);
+  }
+}
+
+/// Mixed utility helpers used around the app UI.
+class AppServices {
+  AppServices._();
+
+  /// Map loose category text to an icon (Material defaults).
+  static IconData iconFor(String? category) {
+    final c = (category ?? '').toLowerCase().trim();
+
+    if (c.contains('plumb')) return Icons.plumbing;
+    if (c.contains('electric')) return Icons.electrical_services;
+    if (c.contains('clean')) return Icons.cleaning_services;
+    if (c.contains('paint')) return Icons.format_paint;
+    if (c.contains('carp')) return Icons.chair_alt;
+    if (c.contains('garden') || c.contains('yard')) return Icons.yard;
+    if (c.contains('move') || c.contains('delivery')) return Icons.local_shipping;
+    if (c.contains('ac') || c.contains('air')) return Icons.ac_unit;
+    if (c.contains('repair') || c.contains('appliance')) return Icons.build;
+    if (c.contains('design') || c.contains('graphic')) return Icons.brush;
+    if (c.contains('computer') || c.contains('it')) return Icons.computer;
+    if (c.contains('tuition') || c.contains('teach') || c.contains('class')) {
+      return Icons.school;
+    }
+    return Icons.work_outline;
+  }
+
+  /// Guess a normalized category label from arbitrary text.
+  static String? guessCategory(String text) {
+    final t = (text).toLowerCase();
+
+    if (t.contains('plumb')) return 'Plumbing';
+    if (t.contains('electric')) return 'Electrician';
+    if (t.contains('clean')) return 'Cleaning';
+    if (t.contains('paint')) return 'Painting';
+    if (t.contains('carp')) return 'Carpentry';
+    if (t.contains('garden') || t.contains('yard')) return 'Gardening';
+    if (t.contains('move') || t.contains('delivery')) return 'Delivery';
+    if (t.contains('ac') || t.contains('air')) return 'AC Repair';
+    if (t.contains('appliance') || t.contains('repair')) return 'Appliance Repair';
+    if (t.contains('design') || t.contains('graphic')) return 'Graphic Design';
+    if (t.contains('computer') || t.contains('it')) return 'IT Support';
+    if (t.contains('tuition') || t.contains('teach') || t.contains('class')) return 'Tuition';
+    return null;
+  }
+
+  /// Extract a few quick tags from text.
+  static List<String> extractTags(String text) {
+    final t = (text).toLowerCase();
+    final tags = <String>{
+      if (t.contains('urgent') || t.contains('asap')) 'urgent',
+      if (t.contains('today')) 'today',
+      if (t.contains('tomorrow')) 'tomorrow',
+      if (t.contains('weekend')) 'weekend',
+      if (t.contains('materials')) 'materials provided',
+      if (t.contains('estimate')) 'estimate first',
+      if (t.contains('onsite')) 'onsite',
+      if (t.contains('remote')) 'remote',
+    };
+    return tags.take(5).toList();
+  }
+
+  /// Merge budgets sensibly (helper util).
+  static (int, int) mergeBands((int, int) a, (int, int) b) {
+    final lo = math.min(a.$1, b.$1);
+    final hi = math.max(a.$2, b.$2);
+    return (lo, hi);
+  }
+}
+
+/// Extension so you can call `.min` / `.max` on positional record (int,int).
+extension PriceBandRecordExt on (int, int) {
+  int get min => $1;
+  int get max => $2;
 }

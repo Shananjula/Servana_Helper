@@ -22,7 +22,19 @@ class RecommendedHelperCard extends StatelessWidget {
             child: Column(
                 mainAxisAlignment: MainAxisAlignment.center,
                 children: [
-                  CircleAvatar(radius: 35, backgroundImage: helper.photoURL != null ? NetworkImage(helper.photoURL!) : null, child: helper.photoURL == null ? const Icon(Icons.person) : null),
+                  CircleAvatar(radius: 35, backgroundImage: helper.photoURL != null ? NetworkImage(helper.photoURL!
+                if (helper.isHelperVerified)
+                  Padding(
+                    padding: const EdgeInsets.only(top: 6),
+                    child: Chip(
+                      visualDensity: VisualDensity.compact,
+                      label: const Text('Verified'),
+                      backgroundColor: Colors.green.withOpacity(0.14),
+                      labelStyle: TextStyle(color: Colors.green.shade900, fontWeight: FontWeight.w800),
+                      side: BorderSide(color: Colors.green.withOpacity(0.25)),
+                    ),
+                  ),
+) : null, child: helper.photoURL == null ? const Icon(Icons.person) : null),
                   const SizedBox(height: 12),
                   Text(helper.displayName ?? '', textAlign: TextAlign.center, maxLines: 2, overflow: TextOverflow.ellipsis, style: theme.textTheme.titleSmall?.copyWith(fontWeight: FontWeight.bold)),
                   const SizedBox(height: 4),
