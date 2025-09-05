@@ -623,6 +623,78 @@ exports.sendCampaign = functions.https.onCall(async function(data, context){
   await db.collection("campaigns").add(doc);
   return { ok: true, topics: topics };
 });
+// -------------------- USER RESOLVE DISPUTE --------------------
+// Lightweight resolver for posters/helpers. Stores resolution and notes.
+// If you want coin movements, pass posterDelta/helperDelta and we’ll write them too.
+exports.resolveDispute = functions.https.onCall(async function(data, context){
+  if (!context.auth) {
+    throw new functions.https.HttpsError("unauthenticated", "Sign in required.");
+  }
+
+  var disputeId = data && data.disputeId;
+  var resolution = data && data.resolution; // e.g., "refund_poster" | "pay_helper" | "split"
+  var notes = (data && data.notes) || "";
+  var posterDelta = Number(data && data.posterCoinDelta || 0);
+  var helperDelta = Number(data && data.helperCoinDelta || 0);
+
+  if (!disputeId || !resolution) {
+    throw new functions.https.HttpsError("invalid-argument", "Pass disputeId and resolution.");
+  }
+
+  var ref = db.collection("disputes").doc(disputeId);
+  var snap = await ref.get();
+  if (!snap.exists) {
+    throw new functions.https.HttpsError("not-found", "Dispute not found.");
+  }
+
+  // If you want to restrict who can resolve (e.g., only poster/helper/admin), add a check here:
+  // var d = snap.data() || {}; var uid = context.auth.uid;
+  // var isParticipant = (d.posterId === uid) || (d.helperId === uid);
+  // if (!isParticipant) throw new functions.https.HttpsError("permission-denied", "Not your dispute.");
+
+  await db.runTransaction(async function(trx){
+    var d = (await trx.get(ref)).data() || {};
+    var posterId = d.posterId || null;
+    var helperId = d.helperId || null;
+
+    // Apply coin deltas if provided (optional)
+    async function applyDelta(userId, amt) {
+      if (!userId || !amt) return;
+      var uref = db.collection("users").doc(userId);
+      var usnap = await trx.get(uref);
+      var u = usnap.data() || {};
+      var prev = Number(u.walletBalance || 0);
+      trx.set(uref, { walletBalance: prev + amt, updatedAt: admin.firestore.FieldValue.serverTimestamp() }, { merge: true });
+
+      var tx = db.collection("transactions").doc();
+      trx.set(tx, {
+        userId: userId,
+        type: "dispute_adjustment",
+        amount: amt,
+        status: "ok",
+        notes: "dispute:" + disputeId + (notes ? " " + notes : ""),
+        createdAt: admin.firestore.FieldValue.serverTimestamp(),
+        updatedAt: admin.firestore.FieldValue.serverTimestamp(),
+      });
+    }
+
+    await applyDelta(posterId, posterDelta);
+    await applyDelta(helperId, helperDelta);
+
+    trx.set(ref, {
+      status: "resolved",
+      resolution: resolution,
+      resolutionNotes: notes,
+      resolvedBy: context.auth.uid,
+      updatedAt: admin.firestore.FieldValue.serverTimestamp(),
+      // Keep deltas for audit
+      posterCoinDelta: posterDelta || null,
+      helperCoinDelta: helperDelta || null
+    }, { merge: true });
+  });
+
+  return { ok: true };
+});
 
 // -------------------- Verification recompute triggers --------------------
 exports.onCategoryProofWrite = functions.firestore

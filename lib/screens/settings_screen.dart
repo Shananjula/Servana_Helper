@@ -24,6 +24,7 @@ import 'package:flutter/material.dart';
 
 import 'package:servana/screens/verification_center_screen.dart';
 import 'package:servana/screens/wallet_screen.dart';
+import 'package:servana/screens/dispute_center_screen.dart'; // ← ADDED THIS LINE
 
 // Destinations already in your project
 import 'package:servana/screens/notifications_screen.dart';
@@ -172,6 +173,16 @@ class _SettingsScreenState extends State<SettingsScreen> {
           const SizedBox(height: 16),
           Text('Help & legal', style: Theme.of(context).textTheme.labelLarge),
           const SizedBox(height: 6),
+          // ADD — Dispute Center entry
+          _tile(
+            context,
+            icon: Icons.balance_rounded,
+            title: 'Dispute Center',
+            subtitle: 'View & resolve disputes, add evidence',
+            onTap: () => Navigator.of(context).push(
+              MaterialPageRoute(builder: (_) => const DisputeCenterScreen()),
+            ),
+          ),
           _tile(
             context,
             icon: Icons.description_rounded,
