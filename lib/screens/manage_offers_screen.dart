@@ -10,6 +10,7 @@ import 'package:cloud_firestore/cloud_firestore.dart';
 import 'package:flutter/material.dart';
 import '../services/firestore_service.dart';
 import '../services/chat_service.dart';
+import 'package:servana/widgets/offer_counter_actions.dart';
 
 class ManageOffersScreen extends StatefulWidget {
   final String taskId;
@@ -85,11 +86,14 @@ class _ManageOffersScreenState extends State<ManageOffersScreen> {
               final helperId = offer['createdBy'] as String?;
               final price = offer['price'];
               final note = offer['note'] ?? offer['message'] ?? '';
+              final status = offer['status'] as String?;
 
               return ListTile(
                 title: Text('Offer: ${price ?? '-'}'),
                 subtitle: Text(note.toString()),
-                trailing: Wrap(
+                trailing: (status == 'counter')
+                  ? OfferCounterActions(offerDocRef: docs[i].reference, padding: EdgeInsets.zero)
+                  : Wrap(
                   spacing: 8,
                   children: [
                     ElevatedButton(

@@ -10,6 +10,7 @@
 import 'package:cloud_firestore/cloud_firestore.dart';
 import 'package:firebase_auth/firebase_auth.dart';
 import 'package:flutter/material.dart';
+import 'package:servana/widgets/payment_methods_row.dart';
 
 import 'package:servana/widgets/status_chip.dart';
 import 'package:servana/screens/step_2_documents.dart' as step2;
@@ -224,6 +225,26 @@ class TaskDetailsScreen extends StatelessWidget {
 
     return Column(
       children: [
+Builder(
+  builder: (context) {
+    // Get the task map safely from local taskData
+    final Map<String, dynamic> data = Map<String, dynamic>.from(taskData ?? const {});
+
+    // Extract fields for the widget
+    final List<String> paymentMethods = (data['paymentMethods'] is List)
+        ? List<String>.from(data['paymentMethods'])
+        : const <String>[];
+    final String? paymentOtherNote = data['paymentOtherNote'] as String?;
+
+    // Show the chips
+    return PaymentMethodsRow(
+      methodIds: paymentMethods,
+      otherNote: paymentOtherNote,
+    );
+  },
+),
+
+
         const SizedBox(height: 12),
         myOfferSection,
         const SizedBox(height: 16),

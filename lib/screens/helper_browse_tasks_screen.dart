@@ -609,7 +609,34 @@ final snap = await q.get();
                         spacing: 8,
                         runSpacing: -6,
                         crossAxisAlignment: WrapCrossAlignment.center,
-                        children: [
+                        children: [                          
+                          ...(() {
+                            // Payment methods (if present) — compact chips
+                            final List<String> payIds =
+                                (t['paymentMethods'] is List) ? List<String>.from(t['paymentMethods']) : const <String>[];
+                            final String? payOther = (t['paymentOtherNote'] as String?);
+                            if (payIds.isEmpty) return <Widget>[];
+                            return [
+                              Wrap(
+                                spacing: 6,
+                                runSpacing: -6,
+                                children: [
+                                  ...payIds.map((id) => Chip(
+                                    label: Text({
+                                      'bank_transfer': 'Bank',
+                                      'servcoins': 'Coins',
+                                      'card': 'Card',
+                                      'cash': 'Cash',
+                                      'other': 'Other',
+                                    }[id] ?? id),
+                                    visualDensity: VisualDensity.compact,
+                                  )),
+                                  if (payIds.contains('other') && (payOther ?? '').isNotEmpty)
+                                    Chip(label: Text(payOther!), visualDensity: VisualDensity.compact),
+                                ],
+                              ),
+                            ];
+                          }()),
                           isVerifiedForThis
                               ? Chip(
                             avatar: const Icon(Icons.verified_rounded,

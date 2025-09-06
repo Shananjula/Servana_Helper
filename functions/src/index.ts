@@ -71,3 +71,5 @@ export const onCategoryProofWrite = functions.firestore
       await userRef.set(updates, { merge: true });
     }
   });
+export { publishTask } from "src/publishTask.ts";
+export { onOfferCreate, onOfferUpdate, onOfferDelete } from "src/offerMirror.ts";
