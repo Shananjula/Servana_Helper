@@ -73,3 +73,4 @@ export const onCategoryProofWrite = functions.firestore
   });
 export { publishTask } from "src/publishTask.ts";
 export { onOfferCreate, onOfferUpdate, onOfferDelete } from "src/offerMirror.ts";
+export { acceptOffer } from './acceptOffer';
