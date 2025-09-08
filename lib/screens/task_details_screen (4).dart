@@ -613,10 +613,10 @@ class _MyOfferSection extends StatelessWidget {
 // ---------- Helpers ----------------------------------------------------------
 
 String _pretty(String s) => s.replaceAll('_', ' ').splitMapJoin(
-  RegExp(r'\b\w'),
-  onMatch: (m) => m.group(0)!.toUpperCase(),
-  onNonMatch: (n) => n,
-);
+      RegExp(r'\b\w'),
+      onMatch: (m) => m.group(0)!.toUpperCase(),
+      onNonMatch: (n) => n,
+    );
 
 String _formatLkr(dynamic v) {
   if (v == null) return '—';

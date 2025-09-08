@@ -308,10 +308,10 @@ class _HelperBrowseTasksScreenState extends State<HelperBrowseTasksScreen> {
                   Expanded(
                     child: _mapMode
                         ? _TasksMapView(
-                      docs: _docs,
-                      userLatLng: _userLatLng,
-                      onOpen: (taskId) => Navigator.push(context, MaterialPageRoute(builder: (_) => TaskDetailsScreen(taskId: taskId))),
-                    )
+                            docs: _docs,
+                            userLatLng: _userLatLng,
+                            onOpen: (taskId) => Navigator.push(context, MaterialPageRoute(builder: (_) => TaskDetailsScreen(taskId: taskId))),
+                          )
                         : _buildList(catLabelMap, allowed),
                   ),
                 ],
@@ -431,8 +431,8 @@ class _TasksMapView extends StatelessWidget {
   @override
   Widget build(BuildContext context) {
     final physical = docs.where((d) =>
-    (d.data()['type'] ?? '').toString().toLowerCase() == 'physical' &&
-        d.data()['location'] is GeoPoint
+      (d.data()['type'] ?? '').toString().toLowerCase() == 'physical' &&
+      d.data()['location'] is GeoPoint
     ).toList();
 
     final markers = <Marker>{};

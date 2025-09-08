@@ -1,7 +1,23 @@
 // lib/screens/helper_browse_tasks_screen.dart
 //
-// Helper “Find Work” — robust Verified gating (slug-based), Physical/Online toggle, Map pins
-// -------------------------------------------------------------------------------------------
+// Helper “Find Work” — with Physical/Online toggle + Map pins
+// -----------------------------------------------------------
+// • Toggle between All / Physical / Online
+// • List↔Map switch; Map shows only PHYSICAL tasks with a pin at task.location (GeoPoint)
+// • Tap a pin → opens TaskDetailsScreen(taskId)
+// • Query still respects “Only verified” and category chips
+// • Gracefully handles missing fields
+//
+// New deps you must add in pubspec.yaml:
+//   google_maps_flutter: ^2.9.0
+//   geolocator: ^11.0.0
+//   url_launcher: ^6.3.0   // optional here, used by details screen
+//
+// Android: Add location permissions in AndroidManifest (ACCESS_FINE_LOCATION) and a Google Maps API key.
+// iOS: Add NSLocationWhenInUseUsageDescription in Info.plist and a Google Maps API key.
+//
+// Existing deps kept: cloud_firestore, firebase_auth
+// -----------------------------------------------------------
 
 import 'dart:async';
 
@@ -12,6 +28,7 @@ import 'package:google_maps_flutter/google_maps_flutter.dart';
 import 'package:geolocator/geolocator.dart';
 
 import 'task_details_screen.dart';
+import 'verification_center_screen.dart';
 
 enum TaskTypeFilter { all, physical, online }
 
@@ -50,6 +67,7 @@ class _HelperBrowseTasksScreenState extends State<HelperBrowseTasksScreen> {
   List<QueryDocumentSnapshot<Map<String, dynamic>>> _docs = const [];
 
   // map state
+  GoogleMapController? _map;
   LatLng? _userLatLng;
 
   @override
@@ -75,13 +93,14 @@ class _HelperBrowseTasksScreenState extends State<HelperBrowseTasksScreen> {
       _userStream = FirebaseFirestore.instance.collection('users').doc(uid).snapshots();
     }
 
-    _getUserLocation();
+    _getUserLocation(); // fire and forget
     _reload();
   }
 
   @override
   void dispose() {
     _searchCtrl.dispose();
+    _map?.dispose();
     super.dispose();
   }
 
@@ -105,43 +124,6 @@ class _HelperBrowseTasksScreenState extends State<HelperBrowseTasksScreen> {
     return snap.docs;
   }
 
-  String _slug(String s) {
-    final lower = s.toLowerCase();
-    final replaced = lower.replaceAll(RegExp(r'[^a-z0-9]+'), '_');
-    final squashed = replaced.replaceAll(RegExp(r'_+'), '_');
-    final trimmed = squashed.replaceAll(RegExp(r'^_|_$'), '');
-    return trimmed;
-  }
-
-  Set<String> _canonSet(dynamic v) {
-    final out = <String>{};
-    if (v is String && v.trim().isNotEmpty) out.add(_slug(v));
-    if (v is Iterable) {
-      for (final x in v) {
-        final s = x?.toString() ?? '';
-        if (s.trim().isNotEmpty) out.add(_slug(s));
-      }
-    }
-    return out;
-  }
-
-  Set<String> _taskCandidates(Map<String, dynamic> t) {
-    final s = <String>{};
-    s.addAll(_canonSet(t['categoryId']));
-    s.addAll(_canonSet(t['category']));
-    s.addAll(_canonSet(t['categoryIds']));
-    s.addAll(_canonSet(t['categoryTokens']));
-    return s;
-  }
-
-  Set<String> _allowedFromUser(Map<String, dynamic> u) {
-    final s = <String>{};
-    s.addAll(_canonSet(u['allowedCategoryIds']));
-    // tolerate a legacy field that might store labels instead of ids
-    s.addAll(_canonSet(u['allowedCategoryLabels']));
-    return s;
-  }
-
   void _reload() async {
     setState(() {
       _loading = true;
@@ -150,9 +132,12 @@ class _HelperBrowseTasksScreenState extends State<HelperBrowseTasksScreen> {
     });
     try {
       final uid = FirebaseAuth.instance.currentUser?.uid;
-      final userSnap = (uid != null) ? await FirebaseFirestore.instance.collection('users').doc(uid).get() : null;
-      final allowedRaw = userSnap?.data() ?? const <String, dynamic>{};
-      final allowed = _allowedFromUser(allowedRaw);
+      final userSnap = (uid != null)
+          ? await FirebaseFirestore.instance.collection('users').doc(uid).get()
+          : null;
+      final allowed = (userSnap?.data()?['allowedCategoryIds'] is List)
+          ? Set<String>.from(List<String>.from(userSnap!.data()!['allowedCategoryIds']).map((e) => e.toString()))
+          : <String>{};
 
       Query<Map<String, dynamic>> q = FirebaseFirestore.instance
           .collection('tasks')
@@ -161,18 +146,27 @@ class _HelperBrowseTasksScreenState extends State<HelperBrowseTasksScreen> {
 
       if (_selectedCatId != null) {
         q = q.where('categoryId', isEqualTo: _selectedCatId);
-      } else if (_onlyVerified && allowed.isNotEmpty) {
-        final first10 = allowed.take(10).toList();
-        q = q.where('categoryId', whereIn: first10);
+      } else if (_onlyVerified) {
+        final cats = allowed.take(10).toList(); // whereIn cap
+        if (cats.isEmpty) {
+          setState(() {
+            _docs = const [];
+            _loading = false;
+          });
+          return;
+        }
+        q = q.where('categoryId', whereIn: cats);
       }
 
+      // Type filter
       if (_type == TaskTypeFilter.physical) {
         q = q.where('type', isEqualTo: 'physical');
       } else if (_type == TaskTypeFilter.online) {
         q = q.where('type', isEqualTo: 'online');
       }
 
-      final snap = await q.limit(200).get();
+      q = q.limit(200);
+      final snap = await q.get();
       var docs = snap.docs;
 
       final term = _search.trim().toLowerCase();
@@ -209,133 +203,148 @@ class _HelperBrowseTasksScreenState extends State<HelperBrowseTasksScreen> {
 
   @override
   Widget build(BuildContext context) {
-    return StreamBuilder<DocumentSnapshot<Map<String, dynamic>>>(
-      stream: _userStream,
-      builder: (context, usnap) {
-        final u = usnap.data?.data() ?? const <String, dynamic>{};
-        final allowed = _allowedFromUser(u);
+    final uid = FirebaseAuth.instance.currentUser?.uid;
+    if (uid == null) {
+      return const Scaffold(body: Center(child: Text('Please sign in.')));
+    }
 
-        return FutureBuilder<List<QueryDocumentSnapshot<Map<String, dynamic>>>>(
-          future: _readCategories(),
-          builder: (context, csnap) {
-            final categories = csnap.data ?? const <QueryDocumentSnapshot<Map<String, dynamic>>>[];
-            final catLabelMap = {for (final d in categories) d.id: (d.data()['label'] ?? d.id).toString()};
+    return FutureBuilder<List<QueryDocumentSnapshot<Map<String, dynamic>>>>(
+      future: _readCategories(),
+      builder: (context, csnap) {
+        final categories = csnap.data ?? const <QueryDocumentSnapshot<Map<String, dynamic>>>[];
+        final catLabelMap = {
+          for (final d in categories) d.id: (d.data()['label'] ?? d.id).toString()
+        };
 
-            return Scaffold(
-              appBar: AppBar(
-                title: const Text('Find Work'),
-                actions: [
-                  Padding(
-                    padding: const EdgeInsets.only(right: 8),
-                    child: SegmentedButton<TaskTypeFilter>(
-                      segments: const [
-                        ButtonSegment(value: TaskTypeFilter.all, icon: Icon(Icons.all_inclusive), label: Text('All')),
-                        ButtonSegment(value: TaskTypeFilter.physical, icon: Icon(Icons.handyman), label: Text('Physical')),
-                        ButtonSegment(value: TaskTypeFilter.online, icon: Icon(Icons.wifi_tethering), label: Text('Online')),
-                      ],
-                      selected: {_type},
-                      onSelectionChanged: (s) {
-                        setState(() => _type = s.first);
-                        _reload();
-                      },
-                    ),
-                  ),
-                  IconButton(
-                    tooltip: _mapMode ? 'List' : 'Map',
-                    onPressed: () => setState(() => _mapMode = !_mapMode),
-                    icon: Icon(_mapMode ? Icons.view_list_rounded : Icons.map_rounded),
-                  ),
-                ],
-                bottom: PreferredSize(
-                  preferredSize: const Size.fromHeight(64),
-                  child: Padding(
-                    padding: const EdgeInsets.fromLTRB(16, 0, 16, 12),
-                    child: TextField(
-                      controller: _searchCtrl,
-                      decoration: InputDecoration(
-                        prefixIcon: const Icon(Icons.search),
-                        hintText: 'Search tasks…',
-                        filled: true,
-                        border: OutlineInputBorder(borderRadius: BorderRadius.circular(12)),
-                        isDense: true,
-                      ),
-                    ),
+        return Scaffold(
+          appBar: AppBar(
+            title: const Text('Find Work'),
+            actions: [
+              // Type filter segmented buttons
+              Padding(
+                padding: const EdgeInsets.only(right: 8),
+                child: SegmentedButton<TaskTypeFilter>(
+                  segments: const [
+                    ButtonSegment(value: TaskTypeFilter.all, icon: Icon(Icons.all_inclusive), label: Text('All')),
+                    ButtonSegment(value: TaskTypeFilter.physical, icon: Icon(Icons.handyman), label: Text('Physical')),
+                    ButtonSegment(value: TaskTypeFilter.online, icon: Icon(Icons.wifi_tethering), label: Text('Online')),
+                  ],
+                  selected: {_type},
+                  onSelectionChanged: (s) {
+                    setState(() => _type = s.first);
+                    _reload();
+                  },
+                ),
+              ),
+              IconButton(
+                tooltip: _mapMode ? 'List' : 'Map',
+                onPressed: () => setState(() => _mapMode = !_mapMode),
+                icon: Icon(_mapMode ? Icons.view_list_rounded : Icons.map_rounded),
+              ),
+            ],
+            bottom: PreferredSize(
+              preferredSize: const Size.fromHeight(64),
+              child: Padding(
+                padding: const EdgeInsets.fromLTRB(16, 0, 16, 12),
+                child: TextField(
+                  controller: _searchCtrl,
+                  decoration: InputDecoration(
+                    prefixIcon: const Icon(Icons.search),
+                    hintText: 'Search tasks…',
+                    filled: true,
+                    border: OutlineInputBorder(borderRadius: BorderRadius.circular(12)),
+                    isDense: true,
                   ),
                 ),
               ),
-              body: Column(
-                children: [
-                  SizedBox(
-                    height: 56,
-                    child: ListView(
-                      padding: const EdgeInsets.symmetric(horizontal: 12),
-                      scrollDirection: Axis.horizontal,
-                      children: [
-                        FilterChip(
-                          label: const Text('All categories'),
-                          selected: _selectedCatId == null,
-                          onSelected: (sel) {
-                            setState(() => _selectedCatId = null);
-                            _reload();
-                          },
-                        ),
-                        const SizedBox(width: 6),
-                        for (final d in categories)
-                          Padding(
-                            padding: const EdgeInsets.only(right: 6),
-                            child: FilterChip(
-                              label: Text(catLabelMap[d.id]!.replaceAll('_',' ')),
-                              selected: _selectedCatId == d.id,
-                              onSelected: (sel) {
-                                setState(() => _selectedCatId = sel ? d.id : null);
-                                _reload();
-                              },
-                            ),
-                          ),
-                        const SizedBox(width: 8),
-                        FilterChip(
-                          label: const Text('Only verified'),
-                          selected: _onlyVerified,
-                          onSelected: (sel) {
-                            setState(() => _onlyVerified = sel);
-                            _reload();
-                          },
-                        ),
-                      ],
+            ),
+          ),
+          body: Column(
+            children: [
+              // Category chips row
+              SizedBox(
+                height: 56,
+                child: ListView(
+                  padding: const EdgeInsets.symmetric(horizontal: 12),
+                  scrollDirection: Axis.horizontal,
+                  children: [
+                    FilterChip(
+                      label: const Text('All categories'),
+                      selected: _selectedCatId == null,
+                      onSelected: (sel) {
+                        setState(() => _selectedCatId = null);
+                        _reload();
+                      },
                     ),
-                  ),
-                  const SizedBox(height: 8),
-                  Expanded(
-                    child: _mapMode
-                        ? _TasksMapView(
-                      docs: _docs,
-                      userLatLng: _userLatLng,
-                      onOpen: (taskId) => Navigator.push(context, MaterialPageRoute(builder: (_) => TaskDetailsScreen(taskId: taskId))),
-                    )
-                        : _buildList(catLabelMap, allowed),
-                  ),
-                ],
+                    const SizedBox(width: 6),
+                    for (final d in categories)
+                      Padding(
+                        padding: const EdgeInsets.only(right: 6),
+                        child: FilterChip(
+                          label: Text(catLabelMap[d.id]!.replaceAll('_',' ')),
+                          selected: _selectedCatId == d.id,
+                          onSelected: (sel) {
+                            setState(() => _selectedCatId = sel ? d.id : null);
+                            _reload();
+                          },
+                        ),
+                      ),
+                    const SizedBox(width: 8),
+                    FilterChip(
+                      label: const Text('Only verified'),
+                      selected: _onlyVerified,
+                      onSelected: (sel) {
+                        setState(() => _onlyVerified = sel);
+                        _reload();
+                      },
+                    ),
+                  ],
+                ),
               ),
-            );
-          },
+              const SizedBox(height: 8),
+              Expanded(
+                child: _mapMode
+                    ? _TasksMapView(
+                        docs: _docs,
+                        userLatLng: _userLatLng,
+                        onOpen: (taskId) {
+                          Navigator.push(context, MaterialPageRoute(builder: (_) => TaskDetailsScreen(taskId: taskId)));
+                        },
+                      )
+                    : _buildList(catLabelMap),
+              ),
+            ],
+          ),
+          floatingActionButton: (_onlyVerified == true && (_selectedCatId == null || _selectedCatId!.isEmpty))
+              ? null
+              : null,
         );
       },
     );
   }
 
-  Widget _buildList(Map<String, String> catLabelMap, Set<String> allowed) {
+  Widget _buildList(Map<String, String> catLabelMap) {
     if (_error != null) {
-      return Center(child: Padding(padding: const EdgeInsets.all(16), child: Text(_error!, textAlign: TextAlign.center)));
+      return Center(
+        child: Padding(
+          padding: const EdgeInsets.all(16.0),
+          child: Text(_error!, textAlign: TextAlign.center),
+        ),
+      );
     }
-    if (_loading && _docs.isEmpty) return const Center(child: CircularProgressIndicator());
+    if (_loading && _docs.isEmpty) {
+      return const Center(child: CircularProgressIndicator());
+    }
     if (_docs.isEmpty) {
-      return ListView(children: const [
-        SizedBox(height: 120),
-        Icon(Icons.work_outline, size: 40),
-        SizedBox(height: 8),
-        Center(child: Text('No tasks found')),
-        SizedBox(height: 200),
-      ]);
+      return ListView(
+        children: const [
+          SizedBox(height: 120),
+          Icon(Icons.work_outline, size: 40),
+          SizedBox(height: 8),
+          Center(child: Text('No tasks found')),
+          SizedBox(height: 200),
+        ],
+      );
     }
 
     return RefreshIndicator(
@@ -366,8 +375,6 @@ class _HelperBrowseTasksScreenState extends State<HelperBrowseTasksScreen> {
 
           final d = _docs[i - 1];
           final t = d.data();
-          final cand = _taskCandidates(t);
-          final isVerified = cand.any(allowed.contains);
 
           final String title = (t['title'] ?? 'Untitled').toString();
           final String desc = (t['description'] ?? '').toString();
@@ -388,12 +395,7 @@ class _HelperBrowseTasksScreenState extends State<HelperBrowseTasksScreen> {
                 child: Column(
                   crossAxisAlignment: CrossAxisAlignment.start,
                   children: [
-                    Row(
-                      children: [
-                        Expanded(child: Text(title, style: Theme.of(context).textTheme.titleMedium)),
-                        if (isVerified) const Chip(label: Text('Verified'), visualDensity: VisualDensity.compact),
-                      ],
-                    ),
+                    Text(title, style: Theme.of(context).textTheme.titleMedium),
                     if (desc.isNotEmpty) ...[
                       const SizedBox(height: 4),
                       Text(desc, maxLines: 2, overflow: TextOverflow.ellipsis),
@@ -421,18 +423,37 @@ class _HelperBrowseTasksScreenState extends State<HelperBrowseTasksScreen> {
   }
 }
 
-// Map view shows only physical tasks (with location)
-class _TasksMapView extends StatelessWidget {
-  const _TasksMapView({required this.docs, required this.userLatLng, required this.onOpen});
+// ——— Map view with pins (PHYSICAL tasks only) ————————————————————
+
+class _TasksMapView extends StatefulWidget {
+  const _TasksMapView({
+    required this.docs,
+    required this.userLatLng,
+    required this.onOpen,
+  });
+
   final List<QueryDocumentSnapshot<Map<String, dynamic>>> docs;
   final LatLng? userLatLng;
   final void Function(String taskId) onOpen;
 
   @override
+  State<_TasksMapView> createState() => _TasksMapViewState();
+}
+
+class _TasksMapViewState extends State<_TasksMapView> {
+  GoogleMapController? _map;
+
+  @override
+  void dispose() {
+    _map?.dispose();
+    super.dispose();
+  }
+
+  @override
   Widget build(BuildContext context) {
-    final physical = docs.where((d) =>
-    (d.data()['type'] ?? '').toString().toLowerCase() == 'physical' &&
-        d.data()['location'] is GeoPoint
+    final physical = widget.docs.where((d) =>
+      (d.data()['type'] ?? '').toString().toLowerCase() == 'physical' &&
+      d.data()['location'] is GeoPoint
     ).toList();
 
     final markers = <Marker>{};
@@ -442,23 +463,38 @@ class _TasksMapView extends StatelessWidget {
       markers.add(Marker(
         markerId: MarkerId(d.id),
         position: LatLng(gp.latitude, gp.longitude),
-        infoWindow: InfoWindow(title: (m['title'] ?? 'Task').toString(), onTap: () => onOpen(d.id)),
+        infoWindow: InfoWindow(title: (m['title'] ?? 'Task').toString(), onTap: () => widget.onOpen(d.id)),
       ));
     }
 
-    LatLng initial = const LatLng(6.9271, 79.8612); // Colombo default
+    // Determine initial camera
+    LatLng initial = const LatLng(6.9271, 79.8612); // Colombo fallback
     if (physical.isNotEmpty) {
       final gp = physical.first.data()['location'] as GeoPoint;
       initial = LatLng(gp.latitude, gp.longitude);
-    } else if (userLatLng != null) {
-      initial = userLatLng!;
+    } else if (widget.userLatLng != null) {
+      initial = widget.userLatLng!;
     }
 
-    return GoogleMap(
-      initialCameraPosition: CameraPosition(target: initial, zoom: 12),
-      markers: markers,
-      myLocationEnabled: userLatLng != null,
-      myLocationButtonEnabled: true,
+    return Stack(
+      children: [
+        GoogleMap(
+          initialCameraPosition: CameraPosition(target: initial, zoom: 12),
+          markers: markers,
+          myLocationEnabled: widget.userLatLng != null,
+          myLocationButtonEnabled: true,
+          onMapCreated: (c) => _map = c,
+        ),
+        Positioned(
+          top: 12, right: 12,
+          child: Card(
+            child: Padding(
+              padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 6),
+              child: Text('${physical.length} physical task${physical.length==1?'':'s'}'),
+            ),
+          ),
+        ),
+      ],
     );
   }
 }
