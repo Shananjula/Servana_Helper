@@ -1,287 +1,242 @@
 
-// lib/services/eligibility_service.dart
-//
-// Eligibility gating (v2.1):
-// - Canonicalize labels/ids aggressively (slug + common prefix stripping)
-// - Allow if EITHER:
-//      a) category tokens intersect user's allowedCategoryIds/tokens/labels
-//      b) OR the user is VERIFIED for that category (verifiedCategories[cat].status == 'verified')
-// - For PHYSICAL categories, require basic docs (flags.basicVerified) regardless.
-// - Clear reason: 'basic_docs' | 'category_not_allowed' | 'not_signed_in'
-//
-// Backwards‑compatible API:
-//
-//   Future<CategoryEligibility> checkHelperEligibility(String rawCategoryId, {bool isPhysical = false})
-//   Future<CategoryEligibility> checkHelperEligibilityForTask(Map<String, dynamic> task)
-//
-// ---------------------------------------------------------------------
+// lib/services/eligibility_service.dart — v6 (token-bag matching)
+// - No basic-docs gating.
+// - Unlock if category is in allowedCategoryIds OR verifiedCategories.
+// - Tolerant ID matching including order-insensitive "token bags" so
+//   "physical_tutor_home" matches "home_tutoring_physical".
 
 import 'dart:async';
 import 'package:cloud_firestore/cloud_firestore.dart';
 import 'package:firebase_auth/firebase_auth.dart';
+import 'package:flutter/foundation.dart';
 
-// ---- Top-level helpers (accessible to normalizeCategoryId) ------------------
+@visibleForTesting
+String normalizeCategoryId(String raw) =>
+    raw.trim().toLowerCase().replaceAll(RegExp(r'[^a-z0-9]+'), '_')
+      .replaceAll(RegExp(r'_+'), '_').replaceAll(RegExp(r'^_|_$'), '');
 
-String _slug(dynamic v) {
-  final s = (v ?? '').toString().trim().toLowerCase();
-  if (s.isEmpty) return s;
-  final sb = StringBuffer();
-  for (final ch in s.runes) {
-    final c = String.fromCharCode(ch);
-    final isAZ = (ch >= 97 && ch <= 122); // a-z
-    final is09 = (ch >= 48 && ch <= 57);  // 0-9
-    if (isAZ || is09) {
-      sb.write(c);
-    } else if (c == ' ' || c == '-' || c == '.' || c == '/' || c == ':' || c == '–' || c == '—' || c == '_') {
-      sb.write('_');
+final Set<String> _modeTokens = {'physical','online','on','site','on_site','onsite'};
+
+List<String> _stemTokens(String s) {
+  final base = normalizeCategoryId(s);
+  final parts = base.split('_').where((t) => t.isNotEmpty).toList();
+  return parts.map((t) {
+    // merge on+site variants
+    if (t == 'on' || t == 'site') return 'on_site';
+    // cheap stemmer: drop common suffixes
+    var w = t;
+    if (w.endsWith('ing') && w.length > 5) w = w.substring(0, w.length - 3);
+    else if (w.endsWith('ers') && w.length > 5) w = w.substring(0, w.length - 3);
+    else if (w.endsWith('es') && w.length > 4) w = w.substring(0, w.length - 2);
+    else if (w.endsWith('s') && w.length > 3) w = w.substring(0, w.length - 1);
+    if (w == 'tuition') w = 'tutor'; // common synonym
+    return w;
+  }).toList();
+}
+
+Set<String> _tokenBag(String s, {bool dropMode = true}) {
+  final toks = _stemTokens(s);
+  final Set<String> bag = {};
+  for (final t in toks) {
+    if (dropMode && (_modeTokens.contains(t))) continue;
+    bag.add(t);
+  }
+  return bag;
+}
+
+bool _bagSimilar(String a, String b) {
+  final A = _tokenBag(a);
+  final B = _tokenBag(b);
+  if (A.isEmpty || B.isEmpty) return false;
+  // Require that all non-mode tokens in A are in B (and vice versa) for strong match
+  return A.containsAll(B) && B.containsAll(A);
+}
+
+Iterable<String> synonymsFor(String base, {bool? isPhysical}) sync* {
+  final b = normalizeCategoryId(base);
+  yield b;
+  for (final s in ['${b}_physical','${b}_online','${b}_on_site','${b}_onsite',
+                   'physical__$b','online__$b','on_site__$b','onsite__$b']) {
+    yield s;
+  }
+  if (isPhysical == true) for (final s in ['${b}_physical','physical__$b','${b}_on_site','on_site__$b','${b}_onsite','onsite__$b']) yield s;
+  if (isPhysical == false) for (final s in ['${b}_online','online__$b']) yield s;
+}
+
+bool _allowedContains(List<String> allowed, String categoryId, {bool? isPhysical}) {
+  final canonAllowed = allowed.map(normalizeCategoryId).toList();
+  for (final s in synonymsFor(categoryId, isPhysical: isPhysical)) {
+    final cs = normalizeCategoryId(s);
+    if (canonAllowed.contains(cs)) return true;
+    // bag-of-words fallback
+    for (final a in canonAllowed) {
+      if (_bagSimilar(a, cs)) return true;
     }
-    // drop other punctuation
   }
-  return sb.toString().replaceAll(RegExp(r'_+'), '_').trim().replaceAll(RegExp(r'^_+|_+$'), '');
+  // also try the direct bag match against original category id
+  for (final a in canonAllowed) {
+    if (_bagSimilar(a, categoryId)) return true;
+  }
+  return false;
 }
 
-String _deprefix(String s) {
-  // Strip common prefixes that appear in doc IDs / labels
-  // e.g., cat_home_tutoring, category_home_tutoring, phys_home_tutoring, physical_home_tutoring
-  const prefixes = [
-    'cat_', 'category_', 'phys_', 'physical_', 'online_', 'onsite_', 'on_site_', 'task_', 'svc_', 'service_'
-  ];
-  for (final p in prefixes) {
-    if (s.startsWith(p)) return s.substring(p.length);
+bool _isVerifiedFor(Map<String, dynamic> verifiedMap, String categoryId, {bool? isPhysical}) {
+  if (verifiedMap.isEmpty) return false;
+  // normalize keys
+  final Map<String, dynamic> canon = {
+    for (final e in verifiedMap.entries) normalizeCategoryId(e.key): e.value
+  };
+  // try synonyms and bag matches
+  bool _keyHit(String key) {
+    final v = canon[key];
+    final status = _readStatus(v);
+    return status == 'verified';
   }
-  return s;
+  for (final s in synonymsFor(categoryId, isPhysical: isPhysical)) {
+    final key = normalizeCategoryId(s);
+    if (canon.containsKey(key) && _keyHit(key)) return true;
+  }
+  for (final key in canon.keys) {
+    if (_bagSimilar(key, categoryId) && _keyHit(key)) return true;
+  }
+  return false;
 }
 
-// Export normalizer so UI can share it
-String normalizeCategoryId(String raw) => _deprefix(_slug(raw));
-
-// --- Public DTO -------------------------------------------------------
 class CategoryEligibility {
-  final String categoryId;          // canonical id we evaluated
-  final bool isRegistered;          // user registered for this category (coarse)
-  final String status;              // 'not_started' | 'pending' | 'verified' | 'rejected' | 'needs_more_info'
-  final bool isAllowed;             // can actually make offers NOW
-  final String? reason;             // null if allowed; otherwise 'basic_docs' | 'category_not_allowed' | 'not_signed_in'
-  final DateTime? submittedAt;
-  final DateTime? verifiedAt;
-
   const CategoryEligibility({
     required this.categoryId,
     required this.isRegistered,
     required this.status,
     required this.isAllowed,
     this.reason,
-    this.submittedAt,
+    this.notes,
     this.verifiedAt,
+    this.submittedAt,
   });
 
-  @override
-  String toString() {
-    return 'CategoryEligibility(categoryId: $categoryId, isRegistered: $isRegistered, '
-           'status: $status, isAllowed: $isAllowed, reason: $reason, '
-           'submittedAt: $submittedAt, verifiedAt: $verifiedAt)';
-  }
+  final String categoryId;
+  final bool isRegistered;
+  final String status;
+  final bool isAllowed;
+  final String? reason;
+  final String? notes;
+  final DateTime? verifiedAt;
+  final DateTime? submittedAt;
+
+  bool get canSeeTasks => isRegistered;
+  bool get canMakeOffer => isAllowed;
 }
 
-// --- Service ----------------------------------------------------------
 class EligibilityService {
-  EligibilityService._();
-  static final EligibilityService _instance = EligibilityService._();
-  factory EligibilityService() => _instance;
+  EligibilityService({FirebaseAuth? auth, FirebaseFirestore? firestore})
+      : _auth = auth ?? FirebaseAuth.instance,
+        _db = firestore ?? FirebaseFirestore.instance;
 
-  final _db = FirebaseFirestore.instance;
-  final _auth = FirebaseAuth.instance;
+  final FirebaseAuth _auth;
+  final FirebaseFirestore _db;
 
   String? get _uid => _auth.currentUser?.uid;
 
-  Future<CategoryEligibility> checkHelperEligibility(
-    String rawCategoryId, {
-    bool isPhysical = false,
-  }) async {
-    return _check(
-      categoryTokens: _tokensForCategory(rawCategoryId),
-      categoryId: normalizeCategoryId(rawCategoryId),
-      isPhysical: isPhysical,
-    );
-  }
-
-  Future<CategoryEligibility> checkHelperEligibilityForTask(
-    Map<String, dynamic> task,
-  ) async {
-    final tokens = _taskCandidates(task);
-    final catId = tokens.isNotEmpty ? tokens.first : normalizeCategoryId(task['categoryId'] ?? task['category'] ?? '');
-    final isPhysical = (task['type']?.toString().toLowerCase() == 'physical') || (task['isPhysical'] == true);
-    return _check(categoryTokens: tokens, categoryId: catId, isPhysical: isPhysical);
-  }
-
-  // ---- Core ----------------------------------------------------------
-  Future<CategoryEligibility> _check({
-    required Set<String> categoryTokens,
-    required String categoryId,
-    required bool isPhysical,
-  }) async {
+  Future<CategoryEligibility> checkHelperEligibility(String rawCategoryIdOrLabel) async {
     final uid = _uid;
+    final catId = normalizeCategoryId(rawCategoryIdOrLabel);
     if (uid == null) {
-      return CategoryEligibility(
-        categoryId: categoryId,
-        isRegistered: false,
-        status: 'not_started',
-        isAllowed: false,
-        reason: 'not_signed_in',
-      );
+      return CategoryEligibility(categoryId: catId, isRegistered: false, status: 'not_started', isAllowed: false, reason: 'not_signed_in');
     }
+    final user = await _readUser(uid);
+    final registered = _asStringList(user['registeredCategories']);
+    final allowed    = _asStringList(user['allowedCategoryIds']);
+    final verifiedMap = _asMap(user['verifiedCategories']);
+    final status = _readStatus(verifiedMap[catId]);
+    final isReg = registered.contains(catId);
+    final allowHit  = _allowedContains(allowed, catId);
+    final verifyHit = _isVerifiedFor(verifiedMap, catId);
+    if (kDebugMode) { print('[elig] cat=$catId reg=$isReg allowHit=$allowHit verifyHit=$verifyHit allowed=$allowed verifiedKeys=${verifiedMap.keys}'); }
+    final meta = await _readProofMeta(uid, catId);
+    return CategoryEligibility(categoryId: catId, isRegistered: isReg, status: status, isAllowed: allowHit || verifyHit, reason: (allowHit||verifyHit)?null:'not_allowed', notes: meta.notes, submittedAt: meta.submittedAt, verifiedAt: meta.verifiedAt);
+  }
 
-    final userSnap = await _db.collection('users').doc(uid).get();
-    final user = userSnap.data() ?? <String, dynamic>{};
+  Future<CategoryEligibility> checkHelperEligibilityForTask(dynamic taskLike) async {
+    final uid = _uid;
+    final t = _taskMap(taskLike);
+    final catId = _taskCategoryId(t);
+    final isPhysical = _taskIsPhysical(t);
+    if (uid == null) {
+      return CategoryEligibility(categoryId: catId, isRegistered: false, status: 'not_started', isAllowed: false, reason: 'not_signed_in');
+    }
+    final user = await _readUser(uid);
+    final registered = _asStringList(user['registeredCategories']);
+    final allowed    = _asStringList(user['allowedCategoryIds']);
+    final verifiedMap = _asMap(user['verifiedCategories']);
+    final status = _readStatus(verifiedMap[catId]);
+    final isReg = registered.contains(catId);
+    final allowHit  = _allowedContains(allowed, catId, isPhysical: isPhysical);
+    final verifyHit = _isVerifiedFor(verifiedMap, catId, isPhysical: isPhysical);
+    if (kDebugMode) { print('[eligForTask] cat=$catId physical=$isPhysical reg=$isReg allowHit=$allowHit verifyHit=$verifyHit allowed=$allowed verifiedKeys=${verifiedMap.keys}'); }
+    final meta = await _readProofMeta(uid, catId);
+    return CategoryEligibility(categoryId: catId, isRegistered: isReg, status: status, isAllowed: allowHit || verifyHit, reason: (allowHit||verifyHit)?null:'not_allowed', notes: meta.notes, submittedAt: meta.submittedAt, verifiedAt: meta.verifiedAt);
+  }
 
-    // Registration/verification
-    final registered = _canonSet(user['registeredCategories']);
-    final allowedIds = _canonSet(user['allowedCategoryIds']);
-    final allowedTok = _canonSet(user['allowedCategoryTokens']);
-    final allowedLbl = _canonSet(user['allowedCategoryLabels']); // just in case
-    final allowedAll = {...allowedIds, ...allowedTok, ...allowedLbl};
-
-    final verifiedMap = (user['verifiedCategories'] is Map)
-        ? Map<String, dynamic>.from(user['verifiedCategories'])
-        : const <String, dynamic>{};
-
-    // --- token sets ---------------------------------------------------
-    final taskTokens = categoryTokens.map(normalizeCategoryId).toSet();
-    final allowTokens = allowedAll.map(normalizeCategoryId).toSet();
-
-    // Also treat VERIFIED categories as allowed (client-side) — avoids UX deadlocks
-    final verifiedAllowed = <String>{};
-    verifiedMap.forEach((k, v) {
-      final st = _readStatus(v);
-      if (st == 'verified') {
-        verifiedAllowed.add(normalizeCategoryId(k));
+  Stream<CategoryEligibility> watchEligibility(String rawCategoryIdOrLabel) async* {
+    final uid = _uid;
+    final categoryId = normalizeCategoryId(rawCategoryIdOrLabel);
+    if (uid == null) {
+      yield CategoryEligibility(categoryId: categoryId, isRegistered: false, status: 'not_started', isAllowed: false, reason: 'not_signed_in');
+      return;
+    }
+    final userDocRef = _db.collection('users').doc(uid);
+    final proofDocRef = _db.collection('category_proofs').doc('${uid}_$categoryId');
+    Map<String, dynamic>? lastUser;
+    Map<String, dynamic>? lastProof;
+    CategoryEligibility _compute() {
+      final user = lastUser ?? const <String, dynamic>{};
+      final registered = _asStringList(user['registeredCategories']);
+      final allowed    = _asStringList(user['allowedCategoryIds']);
+      final verifiedMap = _asMap(user['verifiedCategories']);
+      final isReg = registered.contains(categoryId);
+      final status = _readStatus(verifiedMap[categoryId]);
+      final allowHit  = _allowedContains(allowed, categoryId);
+      final verifyHit = _isVerifiedFor(verifiedMap, categoryId);
+      String? notes; DateTime? submittedAt, verifiedAt;
+      if (lastProof != null) {
+        submittedAt = _toDate(lastProof!['submittedAt']);
+        verifiedAt  = _toDate(lastProof!['verifiedAt']);
+        final rawNote = (lastProof!['notes'] ?? '').toString().trim();
+        notes = rawNote.isEmpty ? null : rawNote;
       }
+      if (kDebugMode) { print('[eligWatch] cat=$categoryId reg=$isReg allowHit=$allowHit verifyHit=$verifyHit allowed=$allowed verifiedKeys=${verifiedMap.keys}'); }
+      return CategoryEligibility(categoryId: categoryId, isRegistered: isReg, status: status, isAllowed: allowHit || verifyHit, reason: (allowHit||verifyHit)?null:'not_allowed', notes: notes, submittedAt: submittedAt, verifiedAt: verifiedAt);
+    }
+    yield* Stream.multi((controller) {
+      StreamSubscription? a; StreamSubscription? b;
+      void emit() { try { controller.add(_compute()); } catch (e, st) { controller.addError(e, st); } }
+      a = userDocRef.snapshots().listen((snap) { lastUser = snap.data() as Map<String, dynamic>?; emit(); }, onError: controller.addError);
+      b = proofDocRef.snapshots().listen((snap) { lastProof = snap.data() as Map<String, dynamic>?; emit(); }, onError: (_) {});
+      controller.onCancel = () async { await a?.cancel(); await b?.cancel(); };
     });
-
-    // Basic docs gate for physical categories
-    final flags = (user['flags'] is Map) ? Map<String, dynamic>.from(user['flags']) : const <String, dynamic>{};
-    final basicOk = flags['basicVerified'] == true || user['basicVerified'] == true || user['verifiedBasicDocs'] == true;
-    final needsBasicDocs = isPhysical && !basicOk;
-
-    // Intersections with generous hierarchy match
-    bool overlap = _anyOverlap(taskTokens, allowTokens);
-    if (!overlap && verifiedAllowed.isNotEmpty) {
-      overlap = _anyOverlap(taskTokens, verifiedAllowed);
-    }
-
-    final isAllow = !needsBasicDocs && overlap;
-
-    final status = _readStatus(verifiedMap[categoryId]);
-    return CategoryEligibility(
-      categoryId: categoryId,
-      isRegistered: registered.contains(categoryId) || _anyHierarchical(registered, categoryId),
-      status: status,
-      isAllowed: isAllow,
-      reason: isAllow ? null : (needsBasicDocs ? 'basic_docs' : 'category_not_allowed'),
-      submittedAt: _toDate(verifiedMap[categoryId]?['submittedAt']),
-      verifiedAt: _toDate(verifiedMap[categoryId]?['verifiedAt']),
-    );
   }
 
-  // ---- Helpers -------------------------------------------------------
-
-  Set<String> _taskCandidates(Map<String, dynamic> t) {
-    final s = <String>{};
-    s.addAll(_canonSet(t['categoryId']));
-    s.addAll(_canonSet(t['category']));
-    s.addAll(_canonSet(t['mainCategoryId']));
-    s.addAll(_canonSet(t['mainCategory']));
-    s.addAll(_canonSet(t['categoryTokens']));
-    s.addAll(_canonSet(t['extraCategoryIds']));
-    s.addAll(_canonSet(t['extraCategoryTokens']));
-    if (s.isEmpty && t.containsKey('label')) s.add(normalizeCategoryId(t['label']));
-    if (s.isEmpty && t.containsKey('title')) s.add(normalizeCategoryId(t['title']));
-    final out = <String>{};
-    for (final tok in s) {
-      out.add(tok);
-      out.add(tok.replaceAll('__', '_'));
-      out.add(tok.replaceAll('-', '_'));
-    }
-    return out.where((e) => e.isNotEmpty).toSet();
+  // helpers
+  Future<Map<String, dynamic>> _readUser(String uid) async { final snap = await _db.collection('users').doc(uid).get(); return snap.data() ?? <String, dynamic>{}; }
+  Map<String, dynamic> _asMap(dynamic v) { if (v is Map) return Map<String, dynamic>.from(v); return const <String, dynamic>{}; }
+  Future<_ProofMeta> _readProofMeta(String uid, String categoryId) async {
+    try { final s = await _db.collection('category_proofs').doc('${uid}_$categoryId').get(); if (s.exists) { final p = s.data() ?? <String, dynamic>{}; return _ProofMeta(submittedAt:_toDate(p['submittedAt']), verifiedAt:_toDate(p['verifiedAt']), notes:(p['notes']??'').toString().trim().isEmpty?null:(p['notes'] as String)); } }
+    catch (_) {}
+    return const _ProofMeta();
   }
-
-  Set<String> _tokensForCategory(dynamic any) {
-    final s = _canonSet(any);
-    if (s.isEmpty && any is String) return {normalizeCategoryId(any)};
-    final out = <String>{};
-    for (final x in s) {
-      out.add(x);
-      out.add(x.replaceAll('__', '_'));
-      out.add(x.replaceAll('-', '_'));
-    }
-    return out.where((e) => e.isNotEmpty).toSet();
-  }
-
-  static Set<String> _canonSet(dynamic v) {
-    final out = <String>{};
-    if (v == null) return out;
-    if (v is String && v.trim().isNotEmpty) out.add(normalizeCategoryId(v));
-    else if (v is Iterable) {
-      for (final x in v) {
-        final s = x?.toString() ?? '';
-        if (s.trim().isNotEmpty) out.add(normalizeCategoryId(s));
-      }
-    } else if (v is Map) {
-      for (final k in v.keys) {
-        final s = k?.toString() ?? '';
-        if (s.trim().isNotEmpty) out.add(normalizeCategoryId(s));
-      }
-    }
-    return out;
-  }
-
-  static bool _anyOverlap(Set<String> a, Set<String> b) {
-    if (a.intersection(b).isNotEmpty) return true;
-    // Try hierarchical match both ways
-    for (final x in a) {
-      for (final y in b) {
-        if (_hierarchicalMatch(x, y)) return true;
-      }
-    }
-    return false;
-  }
-
-  static bool _hierarchicalMatch(String a, String b) {
-    if (a == b) return true;
-    if (a.isEmpty || b.isEmpty) return false;
-    if (a.length > b.length) {
-      return a.startsWith(b + '_');
-    } else if (b.length > a.length) {
-      return b.startsWith(a + '_');
-    }
-    return false;
-  }
-
-  static bool _anyHierarchical(Set<String> set, String id) {
-    for (final x in set) {
-      if (_hierarchicalMatch(x, id)) return true;
-    }
-    return false;
-  }
-
-  static String _readStatus(dynamic st) {
-    if (st == null) return 'not_started';
-    if (st is Map) {
-      final v = (st['status'] ?? st['state'] ?? '').toString();
-      if (_allowedStatuses.contains(v)) return v;
-      return v.isNotEmpty ? v : 'not_started';
-    }
-    if (st is String && _allowedStatuses.contains(st)) return st;
-    return 'not_started';
-  }
-
-  static final Set<String> _allowedStatuses = <String>{
-    'not_started', 'pending', 'verified', 'rejected', 'needs_more_info',
-  };
-
-  static DateTime? _toDate(dynamic ts) {
-    if (ts is Timestamp) return ts.toDate();
-    if (ts is DateTime) return ts;
-    return null;
-  }
+  Map<String, dynamic> _taskMap(dynamic t) { if (t is DocumentSnapshot) { final d=t.data(); if (d is Map<String,dynamic>) return d; return <String,dynamic>{}; } if (t is Map<String,dynamic>) return t; return <String,dynamic>{}; }
+  String _taskCategoryId(Map<String, dynamic> t) { final raw = t['mainCategoryId'] ?? t['categoryId'] ?? t['category_id'] ?? t['mainCategory'] ?? t['mainCategoryLabel'] ?? t['category']; if (raw==null) return ''; return normalizeCategoryId(raw.toString()); }
+  bool _taskIsPhysical(Map<String, dynamic> t) { final v=t['isPhysical']??t['physical']??t['is_physical']; if (v is bool) return v; final mode=(t['mode']??t['taskMode']??t['categoryMode']??t['type']??'').toString().toLowerCase(); return mode=='physical' || mode=='onsite' || mode=='on_site'; }
+  List<String> _asStringList(dynamic v) { if (v is Iterable) return v.map((e)=>normalizeCategoryId(e.toString())).toList(); return const <String>[]; }
+  DateTime? _toDate(dynamic ts) { if (ts is Timestamp) return ts.toDate(); if (ts is DateTime) return ts; if (ts==null) return null; try { final i=int.parse(ts.toString()); return DateTime.fromMillisecondsSinceEpoch(i);} catch(_){ } return null; }
 }
+
+// normalize review statuses; "approved" ≡ "verified".
+String _readStatus(dynamic v) {
+  String s; if (v is Map) s=(v['status']??'not_started').toString(); else s=(v??'not_started').toString();
+  s=s.trim().toLowerCase(); if (s=='approved') return 'verified';
+  const allowed={'not_started','pending','processing','needs_more_info','verified','rejected','submitted'};
+  return allowed.contains(s)?s:'not_started';
+}
+
+class _ProofMeta { const _ProofMeta({this.submittedAt,this.verifiedAt,this.notes}); final DateTime? submittedAt; final DateTime? verifiedAt; final String? notes; }
