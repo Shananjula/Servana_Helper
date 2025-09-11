@@ -1,0 +1,166 @@
+A) Sourcing (same visibility, new fee note)
+
+Applied (public ads): Helpers see all; can apply only if verified for the task’s category.
+
+Direct contact / invite/DM: Poster searches by category → invites an eligible helper.
+Fee: 50 coins charged to the poster at invite/DM time. No helper charge in this path.
+
+B) State machine + fees
+
+Entry 1 — Public application
+listed → applied → negotiating (optional) → accepted → assigned
+
+Fee at accept → assigned: charge helper acceptance fee (e.g., 25) — unchanged.
+
+Entry 2 — Direct invite
+invite/DM → accepted → assigned
+
+On invite/DM: charge 50 to the poster (intro fee).
+
+On accepted → assigned: no helper fee (poster-only in this path).
+
+Still record an auto-offer for audit.
+
+Execution phases, cancels, disputes: unchanged.
+
+C) Action gates (coins + eligibility)
+
+Post task (poster): balance > 500 to post.
+
+Invite/DM (poster): balance ≥ 50; deduct 50 immediately.
+
+Apply (helper): must be verified for task.categoryId.
+
+Assign (either path): helper must be verified.
+No coin requirement on helper for direct path. (Public path fee stays on helper.)
+
+D) Data model (add origin flags)
+tasks/{tid}
+  ...
+  origin: 'public' | 'direct'   // who sourced the match
+
+offers/{oid}
+  taskId, helperId, amount, status
+  origin: 'public' | 'direct'   // helper-submitted vs system auto-offer from invite
+
+
+(We’ll set origin:'direct' when creating the auto-offer for invited flows.)
+
+E) Firestore rules (updated)
+
+Key change: remove the “helper must have ≥ acceptance fee” check from tasks assignment updates, because direct path shouldn’t charge helpers.
+
+rules_version = '2';
+service cloud.firestore {
+  match /databases/{database}/documents {
+
+    function isSignedIn() { return request.auth != null; }
+    function isOwner(uid) { return isSignedIn() && request.auth.uid == uid; }
+
+    function userAllowedForCategoryForUid(uid, catId) {
+      return exists(/databases/$(database)/documents/users/$(uid))
+        && (get(/databases/$(database)/documents/users/$(uid)).data.allowedCategoryIds is list)
+        && get(/databases/$(database)/documents/users/$(uid)).data.allowedCategoryIds.hasAny([catId]);
+    }
+
+    function coinBalance(uid) {
+      return exists(/databases/$(database)/documents/users/$(uid)) &&
+             (get(/databases/$(database)/documents/users/$(uid)).data.servCoinBalance is number)
+        ? get(/databases/$(database)/documents/users/$(uid)).data.servCoinBalance : 0;
+    }
+    function hasCoins(uid, amt) { return coinBalance(uid) >= amt; }
+
+    // Posters must have >500 to create a task
+    match /tasks/{tid} {
+      allow create: if isSignedIn()
+        && request.resource.data.posterId == request.auth.uid
+        && coinBalance(request.auth.uid) > 500;
+
+      // Poster assigns only if helper is eligible (no helper-coin check here)
+      allow update: if isSignedIn()
+        && resource.data.posterId == request.auth.uid
+        && request.resource.data.helperId is string
+        && userAllowedForCategoryForUid(
+             request.resource.data.helperId,
+             (resource.data.categoryId ?? request.resource.data.categoryId)
+           );
+    }
+
+    // Only eligible helpers may create offers for a task’s category
+    match /offers/{oid} {
+      allow create: if isSignedIn()
+        && request.resource.data.taskId is string
+        && userAllowedForCategoryForUid(
+             request.auth.uid,
+             get(/databases/$(database)/documents/tasks/$(request.resource.data.taskId)).data.categoryId
+           );
+    }
+
+    // Invites/DM: poster must have ≥50 at send time
+    match /invites/{iid} {
+      allow create: if isSignedIn()
+        && request.resource.data.posterId == request.auth.uid
+        && userAllowedForCategoryForUid(
+             request.resource.data.helperId,
+             request.resource.data.categoryId
+           )
+        && hasCoins(request.auth.uid, 50);
+    }
+  }
+}
+
+F) Server logic (who pays)
+
+Centralize fees:
+
+export const FEES = {
+  POST_MIN_BALANCE: 500,     // gate only
+  DIRECT_DM_FEE: 50,         // poster pays on invite
+  HELPER_ACCEPT_FEE: 25,     // helper pays ONLY for public offers
+} as const;
+
+
+Invite/DM (poster pays 50): (same as before)
+
+Transaction: check poster ≥50 → decrement poster → write wallet_ledger (kind:dm_fee).
+
+Accept offer (origin-aware):
+
+// acceptOffer({ offerId, posterId })
+await db.runTransaction(async tx => {
+  const offerRef = db.doc(`offers/${offerId}`);
+  const offer = (await tx.get(offerRef)).data()!;
+  const { helperId, taskId, origin } = offer;
+
+  // Charge logic depends on origin
+  if (origin === 'public') {
+    // helper pays acceptance fee
+    const helperRef = db.doc(`users/${helperId}`);
+    const helper = (await tx.get(helperRef)).data()!;
+    if ((helper.servCoinBalance ?? 0) < FEES.HELPER_ACCEPT_FEE)
+      throw new functions.https.HttpsError('failed-precondition','HELPER_NEEDS_TOPUP');
+
+    const ledRef = db.doc(`wallet_ledger/accept:${offerId}`);
+    if (!(await tx.get(ledRef)).exists) {
+      tx.update(helperRef, { servCoinBalance: admin.firestore.FieldValue.increment(-FEES.HELPER_ACCEPT_FEE) });
+      tx.set(ledRef, { uid: helperId, kind: 'accept_fee', amount: -FEES.HELPER_ACCEPT_FEE, taskId, offerId, uniqueKey: `accept:${offerId}`, createdAt: admin.firestore.FieldValue.serverTimestamp() });
+    }
+  } else {
+    // origin === 'direct' → poster-only flow: no helper fee
+    // (We already charged the poster 50 on DM. Nothing else to charge here.)
+  }
+
+  // Assign
+  tx.update(offerRef, { status: 'accepted', updatedAt: admin.firestore.FieldValue.serverTimestamp() });
+  tx.update(db.doc(`tasks/${taskId}`), { helperId, status: 'assigned', origin: origin ?? 'public', updatedAt: admin.firestore.FieldValue.serverTimestamp() });
+});
+
+G) UX tweaks
+
+DM button (poster): “This invite costs 50 coins.”
+
+Accept (poster) on direct invites: “No fee will be charged to the helper.”
+
+Accept (poster) on public offers: “Helper pays an acceptance fee.”
+
+If helper lacks coins on public accept: block with “Helper must top up to complete acceptance.”
