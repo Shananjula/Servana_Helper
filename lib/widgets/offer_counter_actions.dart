@@ -1,274 +1,205 @@
-
-// Replace the entire existing _OfferActions widget with this one.
-// It compiles standalone and wires: safe offer payload, create/update, withdraw, and chat navigation.
+// lib/widgets/offer_counter_actions.dart (v2)
+// Helper-side inline actions for an offer under tasks/{taskId}/offers/{offerId}.
+// Usage options:
+//   OfferCounterActions(offerRef: FirebaseFirestore.instance.doc('tasks/$taskId/offers/$offerId'))
+//   OfferCounterActions(offerId: offerId, taskId: taskId)          // resolves subcollection ref
+//   OfferCounterActions(offerId: offerId)                           // resolves taskId via top-level /offers/{offerId}
+//
+// Shows Agree / Withdraw / Counter back for the helper who owns the offer.
 
 import 'package:cloud_firestore/cloud_firestore.dart';
 import 'package:firebase_auth/firebase_auth.dart';
 import 'package:flutter/material.dart';
-import 'package:servana/services/chat_service.dart';
-import 'package:servana/screens/chat_thread_screen.dart';
 
-class _OfferActions extends StatefulWidget {
-  const _OfferActions({
-    required this.taskId,
-    required this.task,
-    this.enabled = true,
-  });
+class OfferCounterActions extends StatefulWidget {
+  final DocumentReference<Map<String, dynamic>>? offerRef;
+  final String? offerId;
+  final String? taskId;
 
-  final String taskId;
-  final Map<String, dynamic> task;
-  final bool enabled;
+  const OfferCounterActions({
+    super.key,
+    this.offerRef,
+    this.offerId,
+    this.taskId,
+  }) : assert(offerRef != null || offerId != null,
+        'Provide either offerRef OR offerId (+ optional taskId).');
 
   @override
-  State<_OfferActions> createState() => _OfferActionsState();
+  State<OfferCounterActions> createState() => _OfferCounterActionsState();
 }
 
-class _OfferActionsState extends State<_OfferActions> {
+class _OfferCounterActionsState extends State<OfferCounterActions> {
   bool _busy = false;
-  String? _err;
-  Map<String, dynamic>? _my; // last offer by me on this task
+  final _priceCtrl = TextEditingController();
+  final _noteCtrl = TextEditingController();
+  Future<DocumentReference<Map<String, dynamic>>>? _refFuture;
 
-  String get _uid => FirebaseAuth.instance.currentUser!.uid;
-
-  CollectionReference<Map<String, dynamic>> get _offersCol =>
-      FirebaseFirestore.instance.collection('tasks').doc(widget.taskId).collection('offers');
+  String get _uid => FirebaseAuth.instance.currentUser?.uid ?? '';
 
   @override
   void initState() {
     super.initState();
-    _loadMy();
+    _refFuture = _resolveRef();
   }
 
-  Future<void> _loadMy() async {
-    try {
-      final q = await _offersCol
-          .where('helperId', isEqualTo: _uid)
-          .orderBy('updatedAt', descending: true)
-          .limit(1)
-          .get();
-      setState(() => _my = q.docs.isEmpty ? null : q.docs.first.data());
-    } catch (e) {
-      // ignore; section can render without it
-    }
-  }
-
-  Future<void> _withdraw() async {
-    setState(() => _busy = true);
-    try {
-      final q = await _offersCol
-          .where('helperId', isEqualTo: _uid)
-          .where('status', isEqualTo: 'pending')
-          .limit(1)
-          .get();
-      if (q.docs.isNotEmpty) {
-        await q.docs.first.reference.update({
-          'status': 'withdrawn',
-          'updatedAt': FieldValue.serverTimestamp(),
-        });
+  Future<DocumentReference<Map<String, dynamic>>> _resolveRef() async {
+    if (widget.offerRef != null) return widget.offerRef!;
+    final offerId = widget.offerId!;
+    String? taskId = widget.taskId;
+    if (taskId == null || taskId.isEmpty) {
+      // Try top-level /offers mirror to discover taskId
+      final top = await FirebaseFirestore.instance.doc('offers/$offerId').get();
+      if (top.exists) {
+        final t = (top.data() ?? const {})['taskId']?.toString();
+        if (t != null && t.isNotEmpty) taskId = t;
       }
-      await _loadMy();
-    } catch (e) {
-      setState(() => _err = e.toString());
-    } finally {
-      if (mounted) setState(() => _busy = false);
     }
+    if (taskId == null || taskId.isEmpty) {
+      throw StateError('Cannot resolve taskId for offer $offerId. Pass taskId or ensure /offers mirror exists.');
+    }
+    return FirebaseFirestore.instance.doc('tasks/$taskId/offers/$offerId');
   }
 
-  Future<void> _saveOffer(double amount, String note) async {
-    setState(() => _busy = true);
-    try {
-      final now = FieldValue.serverTimestamp();
-      final t = widget.task;
-
-      // Resolve posterId safely
-      final posterIdFromTask = (t['posterId'] ?? t['poster_id'] ?? t['ownerId'] ?? t['userId'] ?? t['uid'] ?? null)?.toString();
-
-      final payload = <String, dynamic>{
-        'taskId': widget.taskId,
-        'helperId': _uid,
-        'price': amount,
-        'amount': amount,
-        'message': note,
-        'status': 'pending',
-        'createdAt': now,
-        'updatedAt': now,
-        if (posterIdFromTask != null && posterIdFromTask.isNotEmpty) 'posterId': posterIdFromTask,
-      };
-
-      // Create or update my latest offer
-      final q = await _offersCol
-          .where('helperId', isEqualTo: _uid)
-          .orderBy('updatedAt', descending: true)
-          .limit(1)
-          .get();
-
-      if (q.docs.isEmpty) {
-        await _offersCol.add(payload);
-      } else {
-        final prev = q.docs.first.data();
-        final prevStatus = (prev['status'] ?? 'pending').toString();
-        if (prevStatus == 'pending' || prevStatus == 'counter') {
-          await q.docs.first.reference.update({
-            'price': amount,
-            'amount': amount,
-            'message': note,
-            'status': 'pending',
-            'updatedAt': now,
-          });
-        } else {
-          await _offersCol.add(payload);
+  @override
+  Widget build(BuildContext context) {
+    return FutureBuilder<DocumentReference<Map<String, dynamic>>>(
+      future: _refFuture,
+      builder: (context, refSnap) {
+        if (refSnap.connectionState != ConnectionState.done) {
+          return const SizedBox(
+            height: 56,
+            child: Center(child: CircularProgressIndicator(strokeWidth: 2)),
+          );
         }
-      }
+        if (refSnap.hasError || refSnap.data == null) {
+          return Text(
+            'Offer actions unavailable: ${refSnap.error ?? 'no ref'}',
+            style: TextStyle(color: Theme.of(context).colorScheme.error),
+          );
+        }
+        final ref = refSnap.data!;
+        return StreamBuilder<DocumentSnapshot<Map<String, dynamic>>>(
+          stream: ref.snapshots(),
+          builder: (context, snap) {
+            if (!snap.hasData) return const SizedBox.shrink();
+            final o = snap.data!.data() ?? const <String, dynamic>{};
+            final helperId = (o['helperId'] ?? '').toString();
+            if (helperId != _uid) return const SizedBox.shrink();
 
-      // Ensure chat exists and navigate
-      final posterId = posterIdFromTask ?? '';
-      await ChatService().ensureChat(
-        taskId: widget.taskId,
-        posterId: posterId,
-        helperId: _uid,
-        taskPreview: {
-          'title': (t['title'] ?? '').toString(),
-          'category': (t['mainCategory'] ?? t['mainCategoryId'] ?? '').toString(),
-          'mode': (t['isPhysical'] == true) ? 'physical' : 'online',
-        },
-      );
-      if (mounted) {
-        Navigator.of(context).push(MaterialPageRoute(builder: (_) => ChatThreadScreen(
-          taskId: widget.taskId, posterId: posterId, helperId: _uid,
-        )));
-      }
+            final status = (o['status'] ?? '').toString();
+            final canInteract = ['pending','negotiating','counter'].contains(status);
+            if (!canInteract) return const SizedBox.shrink();
 
-      await _loadMy();
-    } catch (e) {
-      setState(() => _err = e.toString());
-    } finally {
-      if (mounted) setState(() => _busy = false);
-    }
-  }
+            final cp = o['counterPrice'] ?? o['price'] ?? o['amount'];
+            if ((_priceCtrl.text.isEmpty) && cp != null) {
+              _priceCtrl.text = cp.toString();
+            }
 
-  void _openSheet() {
-    final controller = TextEditingController(
-      text: ((_my?['price'] ?? _my?['amount'])?.toString() ?? ''),
-    );
-    final noteC = TextEditingController(text: (_my?['message'] ?? '').toString());
-    showModalBottomSheet(
-      context: context,
-      isScrollControlled: true,
-      builder: (ctx) {
-        return Padding(
-          padding: EdgeInsets.only(bottom: MediaQuery.of(ctx).viewInsets.bottom),
-          child: Padding(
-            padding: const EdgeInsets.all(16),
-            child: Column(
-              mainAxisSize: MainAxisSize.min,
+            return Column(
               crossAxisAlignment: CrossAxisAlignment.start,
               children: [
-                Text('Make an offer', style: Theme.of(context).textTheme.titleMedium),
-                const SizedBox(height: 8),
+                if (status == 'counter')
+                  Text('Poster countered to ${o['counterPrice']}', style: Theme.of(context).textTheme.bodyMedium),
+                const SizedBox(height: 6),
+                Row(
+                  children: [
+                    Expanded(
+                      child: FilledButton.icon(
+                        onPressed: _busy ? null : () => _agree(ref),
+                        icon: const Icon(Icons.check_circle),
+                        label: const Text('Agree'),
+                      ),
+                    ),
+                    const SizedBox(width: 8),
+                    Expanded(
+                      child: OutlinedButton.icon(
+                        onPressed: _busy ? null : () => _withdraw(ref),
+                        icon: const Icon(Icons.close),
+                        label: const Text('Withdraw'),
+                      ),
+                    ),
+                  ],
+                ),
+                const SizedBox(height: 6),
                 TextField(
-                  controller: controller,
+                  controller: _priceCtrl,
                   keyboardType: TextInputType.number,
-                  decoration: const InputDecoration(labelText: 'Amount (LKR)'),
+                  decoration: const InputDecoration(
+                    labelText: 'Your counter price',
+                    border: OutlineInputBorder(),
+                  ),
+                ),
+                const SizedBox(height: 6),
+                TextField(
+                  controller: _noteCtrl,
+                  maxLines: 2,
+                  decoration: const InputDecoration(
+                    labelText: 'Note (optional)',
+                    border: OutlineInputBorder(),
+                  ),
                 ),
                 const SizedBox(height: 8),
-                TextField(
-                  controller: noteC,
-                  decoration: const InputDecoration(labelText: 'Note (optional)'),
-                ),
-                const SizedBox(height: 12),
                 Align(
                   alignment: Alignment.centerRight,
-                  child: FilledButton(
-                    onPressed: () {
-                      final amt = double.tryParse(controller.text.trim());
-                      if (amt == null) return;
-                      Navigator.of(ctx).pop();
-                      _saveOffer(amt, noteC.text.trim());
-                    },
-                    child: const Text('Send offer'),
+                  child: OutlinedButton.icon(
+                    onPressed: _busy ? null : () => _counterAgain(ref),
+                    icon: const Icon(Icons.swap_horiz),
+                    label: const Text('Counter back'),
                   ),
-                )
+                ),
               ],
-            ),
-          ),
+            );
+          },
         );
       },
     );
   }
 
-  String _formatLkr(dynamic v) {
-    final n = (v is num) ? v.toDouble() : double.tryParse(v?.toString() ?? '') ?? 0;
-    return 'LKR ${n.toStringAsFixed(0)}';
+  Future<void> _agree(DocumentReference<Map<String, dynamic>> ref) async {
+    setState(() => _busy = true);
+    try {
+      await ref.update({
+        'helperAgreed': true,
+        'agreedAt': FieldValue.serverTimestamp(),
+        'updatedAt': FieldValue.serverTimestamp(),
+      });
+      if (mounted) {
+        ScaffoldMessenger.of(context).showSnackBar(const SnackBar(content: Text('Agreed. Waiting for poster to accept.')));
+      }
+    } finally {
+      if (mounted) setState(() => _busy = false);
+    }
   }
 
-  @override
-  Widget build(BuildContext context) {
-    final dis = !widget.enabled || _busy;
-    final status = (_my?['status'] ?? 'none').toString();
-    final counter = _my?['counterPrice'];
+  Future<void> _withdraw(DocumentReference<Map<String, dynamic>> ref) async {
+    setState(() => _busy = true);
+    try {
+      await ref.update({
+        'status': 'withdrawn',
+        'updatedAt': FieldValue.serverTimestamp(),
+      });
+    } finally {
+      if (mounted) setState(() => _busy = false);
+    }
+  }
 
-    return Card(
-      child: Padding(
-        padding: const EdgeInsets.all(12),
-        child: Column(
-          crossAxisAlignment: CrossAxisAlignment.start,
-          children: [
-            Row(
-              children: [
-                const Icon(Icons.handshake_outlined, size: 18),
-                const SizedBox(width: 8),
-                Text('Offers', style: Theme.of(context).textTheme.titleMedium),
-                const Spacer(),
-                if (_busy) const SizedBox(width: 16, height: 16, child: CircularProgressIndicator(strokeWidth: 2)),
-              ],
-            ),
-            if (_err != null)
-              Padding(
-                padding: const EdgeInsets.only(top: 6),
-                child: Text(_err!, style: const TextStyle(color: Colors.red)),
-              ),
-            const SizedBox(height: 8),
-            if (!widget.enabled)
-              const Text('You’re not eligible to make an offer on this task.'),
-            const SizedBox(height: 8),
-            Row(
-              children: [
-                FilledButton.icon(
-                  onPressed: dis ? null : _openSheet,
-                  icon: const Icon(Icons.local_offer_outlined),
-                  label: Text(_my == null ? 'Make offer' : 'Edit offer'),
-                ),
-                const SizedBox(width: 12),
-                OutlinedButton.icon(
-                  onPressed: dis || _my == null ? null : _withdraw,
-                  icon: const Icon(Icons.undo_outlined),
-                  label: const Text('Withdraw'),
-                ),
-              ],
-            ),
-            if (counter != null) ...[
-              const SizedBox(height: 10),
-              Row(
-                children: [
-                  const Icon(Icons.swap_horiz, size: 16),
-                  const SizedBox(width: 6),
-                  Text('Counter offered: ${_formatLkr(counter)}'),
-                  const Spacer(),
-                  OutlinedButton(
-                    onPressed: dis ? null : () => _saveOffer((counter as num).toDouble(), (_my?['message'] ?? '').toString()),
-                    child: const Text('Accept counter'),
-                  ),
-                ],
-              ),
-            ],
-            if (_my != null) ...[
-              const SizedBox(height: 10),
-              Text('Your offer: ${_formatLkr(_my?['price'] ?? _my?['amount'])}'),
-              Text('Status: $status'),
-            ]
-          ],
-        ),
-      ),
-    );
+  Future<void> _counterAgain(DocumentReference<Map<String, dynamic>> ref) async {
+    final val = _priceCtrl.text.trim();
+    final price = num.tryParse(val);
+    if (price == null || price <= 0) {
+      ScaffoldMessenger.of(context).showSnackBar(const SnackBar(content: Text('Enter a valid number.')));
+      return;
+    }
+    setState(() => _busy = true);
+    try {
+      await ref.update({
+        'status': 'negotiating',
+        'helperCounterPrice': price,
+        'helperCounterNote': _noteCtrl.text.trim(),
+        'updatedAt': FieldValue.serverTimestamp(),
+      });
+    } finally {
+      if (mounted) setState(() => _busy = false);
+    }
   }
 }

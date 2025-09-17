@@ -1,8 +1,14 @@
 // functions/src/publishTask.ts
 import * as functions from "firebase-functions";
 import * as admin from "firebase-admin";
+
+// Initialize Firebase Admin outside the function to avoid re-initialization
 try { admin.app(); } catch { admin.initializeApp(); }
 const db = admin.firestore();
+const FEES = {
+  POST_MIN_BALANCE: 500,
+  POST_FEE: 20
+};
 
 type PlatformPosting = {
   posting?: {
@@ -13,6 +19,12 @@ type PlatformPosting = {
   }
 };
 
+/**
+ * Reads the available servCoinBalance from a Firestore document.
+ * Handles various field names and ensures the value is a valid number.
+ * @param u The user document data.
+ * @returns The servCoinBalance, or 0 if not found or invalid.
+ */
 function readCoins(u: FirebaseFirestore.DocumentData | undefined): number {
   if (!u) return 0;
   for (const f of ["servCoinBalance", "walletBalance", "coins"]) {
@@ -21,89 +33,112 @@ function readCoins(u: FirebaseFirestore.DocumentData | undefined): number {
   }
   return 0;
 }
+
+/**
+ * Updates a record with a new balance, ensuring consistency across different field names.
+ * @param update The record to update.
+ * @param newBalance The new coin balance to write.
+ */
 function writeCoins(update: Record<string, unknown>, newBalance: number) {
   update["servCoinBalance"] = newBalance;
   update["walletBalance"] = newBalance;
   update["coins"] = newBalance;
 }
+
+/**
+ * Picks the primary budget value from a task object.
+ * @param task The task data.
+ * @returns The budget amount.
+ */
 function pickBudget(task: any): number {
   const n = (x: any) => (typeof x === "number" ? x : 0);
   return Math.max(n(task?.budget), n(task?.price), n(task?.budgetMin));
 }
 
+/**
+ * The main callable function to publish a task and deduct a fee.
+ * This function uses a Firestore transaction to ensure atomicity and idempotency.
+ */
 export const publishTask = functions.https.onCall(async (data, ctx) => {
-  if (!ctx.auth) throw new functions.https.HttpsError("unauthenticated", "Sign in.");
-  const taskId = data?.taskId as string | undefined;
-  const idempotencyKey = data?.idempotencyKey as string | undefined;
-  if (!taskId || !idempotencyKey) {
-    throw new functions.https.HttpsError("invalid-argument", "taskId & idempotencyKey required.");
+  if (!ctx.auth) {
+    throw new functions.https.HttpsError("unauthenticated", "Sign in to publish a task.");
   }
   const uid = ctx.auth.uid!;
-  const taskRef = db.collection("tasks").doc(taskId);
-  const userRef = db.collection("users").doc(uid);
-  const settingsRef = db.collection("settings").doc("platform");
+  const { taskId, taskPayload } = data; // Assuming taskPayload contains the task details
 
-  await db.runTransaction(async tx => {
-    const [taskSnap, userSnap, setSnap] = await Promise.all([
-      tx.get(taskRef), tx.get(userRef), tx.get(settingsRef)
+  if (!taskId || !taskPayload) {
+    throw new functions.https.HttpsError("invalid-argument", "Task ID and payload are required.");
+  }
+
+  const db = admin.firestore();
+
+  await db.runTransaction(async (tx) => {
+    // Read the poster's balance and platform settings
+    const posterRef = db.doc(`users/${uid}`);
+    const settingsRef = db.doc('settings/platform');
+    const [posterSnap, settingsSnap] = await Promise.all([
+      tx.get(posterRef), tx.get(settingsRef)
     ]);
-    if (!taskSnap.exists) throw new functions.https.HttpsError("not-found", "Task missing.");
-    const task = taskSnap.data()!;
-    const owner = (task.posterId ?? task.createdBy ?? uid);
-    if (owner !== uid) throw new functions.https.HttpsError("permission-denied", "Not your task.");
-    if ((task.status ?? 'draft') === 'open') return; // idempotent
+    const posterBal = readCoins(posterSnap.data());
 
-    const posting = (setSnap.exists ? (setSnap.data() as PlatformPosting).posting : undefined) ?? {};
-    const minBal = Number.isFinite(posting.minBalanceCoins) ? Number(posting.minBalanceCoins) : 200;
-    const pct    = Number.isFinite(posting.feePercent)      ? Number(posting.feePercent)      : 5;
-    const minFee = Number.isFinite(posting.minFeeCoins)     ? Number(posting.minFeeCoins)     : 5;
-    const maxFee = Number.isFinite(posting.maxFeeCoins)     ? Number(posting.maxFeeCoins)     : 500;
+    // Read configured fees from settings, using defaults if not set
+    const configuredMin = Number((settingsSnap.data() || {}).posting?.minBalanceCoins ?? FEES.POST_MIN_BALANCE);
+    const configuredPostFee = Number((settingsSnap.data() || {}).posting?.postFeeCoins ?? FEES.POST_FEE);
 
-    const walletDoc = await tx.get(userRef);
-    const wallet = walletDoc.data() || {};
-    const coins = readCoins(wallet);
-    if (coins < minBal) throw new functions.https.HttpsError("failed-precondition", "insufficient_funds");
+    // Enforce hard floors for minimum balance and post fee
+    const MIN = Math.max(configuredMin, FEES.POST_MIN_BALANCE);
+    const POST_FEE = Math.max(configuredPostFee, 0);
 
-    // idempotency: reuse prior txn if same key
-    const prior = await db.collectionGroup("transactions")
-      .where("idempotencyKey", "==", idempotencyKey)
-      .where("type", "==", "posting_fee")
-      .where("taskId", "==", taskId).limit(1).get();
-
-    let fee = 0, txnId: string | null = null;
-    if (prior.empty) {
-      const budget = pickBudget(task);
-      fee = Math.max(minFee, Math.min(maxFee, Math.ceil((budget * pct) / 100)));
-      const newBal = coins - fee;
-      if (newBal < 0) throw new functions.https.HttpsError("failed-precondition", "insufficient_funds");
-
-      const patch: Record<string, unknown> = { updatedAt: admin.firestore.FieldValue.serverTimestamp() };
-      writeCoins(patch, newBal);
-      tx.set(userRef, patch, { merge: true });
-
-      const txnRef = userRef.collection("transactions").doc();
-      txnId = txnRef.id;
-      tx.set(txnRef, {
-        type: "posting_fee",
-        amountCoins: fee,
-        taskId,
-        idempotencyKey,
-        status: "succeeded",
-        createdAt: admin.firestore.FieldValue.serverTimestamp(),
-      });
-    } else {
-      txnId = prior.docs[0].id;
-      fee = Number(prior.docs[0].data()?.amountCoins ?? 0);
+    // Gate: Check if the poster has enough balance
+    if (posterBal < MIN + POST_FEE) {
+      throw new functions.https.HttpsError('failed-precondition', 'Insufficient funds to post the task and pay the fee.');
     }
 
+    // Use the provided task ID for idempotency
+    const taskRef = db.collection('tasks').doc(taskId);
+    const ledgerRef = db.doc(`wallet_ledger/post_fee:${taskId}`);
+    const ledgerSnap = await tx.get(ledgerRef);
+
+    // Check if the task already exists
+    const taskSnap = await tx.get(taskRef);
+    if (taskSnap.exists && (taskSnap.data()?.status === 'open' || taskSnap.data()?.status === 'listed')) {
+        // The task is already published, handle idempotently
+        return;
+    }
+
+    // Create the task document with a status of 'listed'
+    const now = admin.firestore.FieldValue.serverTimestamp();
     tx.set(taskRef, {
-      status: "open",
-      postingFeeCoins: fee,
-      postingFeeTxnId: txnId,
-      postedAt: admin.firestore.FieldValue.serverTimestamp(),
-      updatedAt: admin.firestore.FieldValue.serverTimestamp(),
-    }, { merge: true });
+      ...taskPayload,
+      id: taskId,
+      posterId: uid,
+      status: 'listed',
+      createdAt: now,
+      updatedAt: now,
+    });
+
+    // Charge POST_FEE exactly once (idempotent check on the ledger doc)
+    if (!ledgerSnap.exists && POST_FEE > 0) {
+      // Deduct the fee from the poster's balance
+      const newBalance = posterBal - POST_FEE;
+      const posterUpdate: Record<string, unknown> = {
+        updatedAt: now,
+        balance: newBalance
+      };
+      writeCoins(posterUpdate, newBalance);
+      tx.update(posterRef, posterUpdate);
+
+      // Create a ledger entry for the fee
+      tx.set(ledgerRef, {
+        uid,
+        kind: 'post_fee',
+        amount: -POST_FEE,
+        taskId,
+        uniqueKey: `post_fee:${taskId}`,
+        createdAt: now,
+      });
+    }
   });
 
-  return { ok: true };
+  return { ok: true, message: `Task ${taskId} published successfully.` };
 });

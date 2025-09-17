@@ -7,6 +7,7 @@
 
 import 'dart:async';
 import 'dart:math' as math;
+import '../widgets/offer_counter_actions.dart';
 
 import 'package:cloud_firestore/cloud_firestore.dart';
 import 'package:firebase_auth/firebase_auth.dart';
@@ -19,6 +20,8 @@ import 'package:servana/services/eligibility_service.dart' as elig;
 import 'package:servana/services/chat_service.dart';
 import 'package:servana/screens/chat_thread_screen.dart';
 import 'package:servana/utils/chat_id.dart';
+import 'package:servana/services/offer_submit_service.dart';
+// Note: Assuming OfferCounterActions widget exists in this file or another imported file.
 
 class TaskDetailsScreen extends StatefulWidget {
   const TaskDetailsScreen({super.key, required this.taskId, this.task});
@@ -372,6 +375,7 @@ class _UnlockBanner extends StatelessWidget {
 // import 'package:flutter/material.dart';
 // import 'package:servana/services/chat_service.dart';
 // import 'package:servana/screens/chat_thread_screen.dart';
+// import 'package:servana/services/offer_submit_service.dart';
 
 class _OfferActions extends StatefulWidget {
   const _OfferActions({
@@ -436,78 +440,6 @@ class _OfferActionsState extends State<_OfferActions> {
     }
   }
 
-  Future<void> _saveOffer(double amount, String note) async {
-    setState(() => _busy = true);
-    try {
-      final now = FieldValue.serverTimestamp();
-      final t = widget.task;
-
-      // Resolve posterId safely (optional)
-      final posterIdFromTask = (t['posterId'] ?? t['poster_id'] ?? t['ownerId'] ?? t['userId'] ?? t['uid'] ?? null)?.toString();
-
-      final payload = <String, dynamic>{
-        'taskId': widget.taskId,
-        'helperId': _uid,
-        'price': amount,
-        'amount': amount,
-        'message': note,
-        'status': 'pending',
-        'createdAt': now,
-        'updatedAt': now,
-        if (posterIdFromTask != null && posterIdFromTask.isNotEmpty) 'posterId': posterIdFromTask,
-      };
-
-      // Create or update my latest offer
-      final q = await _offersCol
-          .where('helperId', isEqualTo: _uid)
-          .orderBy('updatedAt', descending: true)
-          .limit(1)
-          .get();
-
-      if (q.docs.isEmpty) {
-        await _offersCol.add(payload);
-      } else {
-        final prev = q.docs.first.data();
-        final prevStatus = (prev['status'] ?? 'pending').toString();
-        if (prevStatus == 'pending' || prevStatus == 'counter') {
-          await q.docs.first.reference.update({
-            'price': amount,
-            'amount': amount,
-            'message': note,
-            'status': 'pending',
-            'updatedAt': now,
-          });
-        } else {
-          await _offersCol.add(payload);
-        }
-      }
-
-      // Ensure chat exists and navigate
-      final posterId = posterIdFromTask ?? '';
-      await ChatService().ensureChat(
-        taskId: widget.taskId,
-        posterId: posterId,
-        helperId: _uid,
-        taskPreview: {
-          'title': (t['title'] ?? '').toString(),
-          'category': (t['mainCategory'] ?? t['mainCategoryId'] ?? '').toString(),
-          'mode': (t['isPhysical'] == true) ? 'physical' : 'online',
-        },
-      );
-      if (mounted) {
-        Navigator.of(context).push(MaterialPageRoute(builder: (_) => ChatThreadScreen(
-          taskId: widget.taskId, posterId: posterId, helperId: _uid,
-        )));
-      }
-
-      await _loadMy();
-    } catch (e) {
-      setState(() => _err = e.toString());
-    } finally {
-      if (mounted) setState(() => _busy = false);
-    }
-  }
-
   void _openSheet() {
     final controller = TextEditingController(text: ((_my?['price'] ?? _my?['amount'])?.toString() ?? ''));
     final noteC = TextEditingController(text: (_my?['message'] ?? '').toString());
@@ -539,11 +471,25 @@ class _OfferActionsState extends State<_OfferActions> {
                 Align(
                   alignment: Alignment.centerRight,
                   child: FilledButton(
-                    onPressed: () {
+                    onPressed: () async {
                       final amt = double.tryParse(controller.text.trim());
                       if (amt == null) return;
                       Navigator.of(ctx).pop();
-                      _saveOffer(amt, noteC.text.trim());
+                      setState(() => _busy = true);
+                      try {
+                        await OfferSubmitService.saveOffer(
+                          taskId: widget.taskId,
+                          task: widget.task,
+                          amount: amt,
+                          note: noteC.text.trim(),
+                        );
+                        // _saveOffer no longer exists, but we can reuse the logic to update the state after the service call
+                        await _loadMy();
+                      } catch (e) {
+                        setState(() => _err = e.toString());
+                      } finally {
+                        if (mounted) setState(() => _busy = false);
+                      }
                     },
                     child: const Text('Send offer'),
                   ),
@@ -616,7 +562,22 @@ class _OfferActionsState extends State<_OfferActions> {
                   Text('Counter offered: ${_formatLkr(counter)}'),
                   const Spacer(),
                   OutlinedButton(
-                    onPressed: dis ? null : () => _saveOffer((counter as num).toDouble(), (_my?['message'] ?? '').toString()),
+                    onPressed: dis ? null : () async {
+                      setState(() => _busy = true);
+                      try {
+                        await OfferSubmitService.saveOffer(
+                          taskId: widget.taskId,
+                          task: widget.task,
+                          amount: (counter as num).toDouble(),
+                          note: (_my?['message'] ?? '').toString(),
+                        );
+                        await _loadMy();
+                      } catch (e) {
+                        setState(() => _err = e.toString());
+                      } finally {
+                        if (mounted) setState(() => _busy = false);
+                      }
+                    },
                     child: const Text('Accept counter'),
                   ),
                 ],
@@ -658,10 +619,22 @@ class _MyOfferSection extends StatelessWidget {
         if (docs.isEmpty) return const SizedBox.shrink();
         final d = docs.first.data();
         final status = (d['status'] ?? 'pending').toString();
-        return ListTile(
-          leading: const Icon(Icons.receipt_long_outlined),
-          title: Text('Latest offer: ${_formatLkr(d['price'] ?? d['amount'])}'),
-          subtitle: Text('Status: $status  — updated ${(d['updatedAt'] is Timestamp) ? _timeAgo((d['updatedAt'] as Timestamp).toDate()) : ''}'),
+
+        final thatOfferSnapshot = docs.first;
+
+        return Column(
+          children: [
+            ListTile(
+              leading: const Icon(Icons.receipt_long_outlined),
+              title: Text('Latest offer: ${_formatLkr(d['price'] ?? d['amount'])}'),
+              subtitle: Text('Status: $status  — updated ${(d['updatedAt'] is Timestamp) ? _timeAgo((d['updatedAt'] as Timestamp).toDate()) : ''}'),
+            ),
+            // The requested widget from the user's prompt
+            OfferCounterActions(
+              offerRef: thatOfferSnapshot.reference,
+              offerId: thatOfferSnapshot.id,
+            ),
+          ],
         );
       },
     );

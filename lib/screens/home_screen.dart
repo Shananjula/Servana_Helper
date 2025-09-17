@@ -19,6 +19,7 @@ import 'helper_browse_tasks_screen.dart';         // 2) Find Work (Helper-specif
 import 'activity_screen.dart';                    // 3) Activity (existing screen)
 import 'chat_list_screen.dart';                   // 4) Chats
 import 'settings_screen.dart';                    // 5) Profile / Settings
+import 'package:servana/screens/helper_browse_tasks_screen.dart';
 
 class HomeScreen extends StatefulWidget {
   /// Open a specific tab: 0=Dashboard, 1=Find Work, 2=Activity, 3=Chats, 4=Profile

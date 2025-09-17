@@ -1,0 +1,1 @@
+export const pairKey = (a: string, b: string) => (a < b ? `${a}_${b}` : `${b}_${a}`);
